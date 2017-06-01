@@ -7,16 +7,23 @@ set_up()
     docker network create br-app
     docker network create br-store
 
-    docker run -it --detach --name br --rm unikernel/mirage
+    docker run -it --detach --name br unikernel/mirage
     docker network disconnect bridge br
     docker network connect br-app br
     docker network connect br-store br
 
-    APP_DNS=$(docker inspect br | python container_ip.py br-app)
-    STORE_DNS=$(docker inspect br | python container_ip.py br-store)
+    APP_DNS_GW=$(docker inspect br | python container_ip.py br-app)
+    STORE_DNS_GW=$(docker inspect br | python container_ip.py br-store)
 
-    docker run -it --detach --name app   --rm --network br-app   --dns $APP_DNS   alpine:3.5 sh
-    docker run -it --detach --name store --rm --network br-store --dns $STORE_DNS alpine:3.5 sh
+    docker run -it --detach --name app   --rm --network br-app \
+	   --dns $APP_DNS_GW   --cap-add NET_ADMIN alpine:3.5 sh
+    docker exec app ip route del default
+    docker exec app ip route add default via $APP_DNS_GW
+
+    docker run -it --detach --name store --rm --network br-store \
+	   --dns $STORE_DNS_GW --cap-add NET_ADMIN alpine:3.5 sh
+    docker exec store ip route del default
+    docker exec store ip route add default via $STORE_DNS_GW
 }
 
 tear_down()
