@@ -5,5 +5,10 @@ PKG mirage
 PKG mirage-types-lwt
 PKG mirage-net-unix
 PKG tcpip.ethif
+PKG tcpip.ipv4
+PKG tcpip.tcp
+PKG ipaddr
+PKG mirage-unix
+PKG dns
 
 S src
