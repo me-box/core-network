@@ -20,6 +20,40 @@ type endpoint = {
 let pp_port = Ipaddr.V4.Prefix.pp_hum
 
 
+(* dns and look-up/forward *)
+module Dispatcher = struct
+
+  type mux_tbl = (Ipaddr.V4.Prefix.t, pkt option -> unit) Hashtbl.t
+
+  let create () : mux_tbl = Hashtbl.create 7
+
+  let find_port tbl dst =
+    let n =
+      let m = Ipaddr.V4.Prefix.mask netmask in
+      Ipaddr.V4.Prefix.of_netmask m dst
+    in
+    if Hashtbl.mem tbl n then Some (Hashtbl.find tbl n)
+    else None
+
+  let register tbl {port; pkt_in; push_pkt} =
+    Hashtbl.replace tbl port push_pkt;
+    Log.info (fun m -> m "[dispatcher] port %a registered" Ipaddr.V4.Prefix.pp_hum port) >>= fun () ->
+    let rec drain_n_push () =
+      Lwt_stream.get pkt_in >>= (function
+        | None -> Log.err (fun m -> m "[dispatcher] stream closed of %a" pp_port port)
+        | Some (`Tcp (_, dst, _)) as pkt ->
+            (match find_port tbl dst with
+            | Some push -> Lwt.return @@ push pkt
+            | None -> Log.err (fun m -> m "[dispatcher] no port found for %a" Ipaddr.V4.pp_hum dst))
+        | Some (`Udp (_, dst, _)) ->
+            Log.info (fun m -> m "[dispatcher] got udp pkt for %a" Ipaddr.V4.pp_hum dst))
+      >>= fun () -> drain_n_push ()
+    in
+    Lwt.async (fun () -> drain_n_push ());
+    Lwt.return_unit
+end
+
+
 module STACK (N: NETWORK)(E: ETHIF)(A: ARP)(I: IPV4) = struct
 
   let create n e a i =
@@ -134,40 +168,17 @@ module STACK (N: NETWORK)(E: ETHIF)(A: ARP)(I: IPV4) = struct
     Lwt.return ({port; pkt_in = in_s; push_pkt = out_push},
                 stack_driver, write_loop)
 
+  let rec drain_pkts n fn () =
+    N.listen n fn >>= (function
+        | Ok () -> Lwt.return_unit
+        | Error err -> Log.err (fun m -> m "[net] error: %a" N.pp_error err))
+    >>= drain_pkts n fn
+
 end
 
+module Vmnetd = struct
 
-(* dns and look-up/forward *)
-module Dispatcher = struct
-
-  type mux_tbl = (Ipaddr.V4.Prefix.t, pkt option -> unit) Hashtbl.t
-
-  let create () : mux_tbl = Hashtbl.create 7
-
-  let find_port tbl dst =
-    let n =
-      let m = Ipaddr.V4.Prefix.mask netmask in
-      Ipaddr.V4.Prefix.of_netmask m dst
-    in
-    if Hashtbl.mem tbl n then Some (Hashtbl.find tbl n)
-    else None
-
-  let register tbl {port; pkt_in; push_pkt} =
-    Hashtbl.replace tbl port push_pkt;
-    Log.info (fun m -> m "[dispatcher] port %a registered" Ipaddr.V4.Prefix.pp_hum port) >>= fun () ->
-    let rec drain_n_push () =
-      Lwt_stream.get pkt_in >>= (function
-        | None -> Log.err (fun m -> m "[dispatcher] stream closed of %a" pp_port port)
-        | Some (`Tcp (_, dst, _)) as pkt ->
-            (match find_port tbl dst with
-            | Some push -> Lwt.return @@ push pkt
-            | None -> Log.err (fun m -> m "[dispatcher] no port found for %a" Ipaddr.V4.pp_hum dst))
-        | Some (`Udp (_, dst, _)) ->
-            Log.info (fun m -> m "[dispatcher] got udp pkt for %a" Ipaddr.V4.pp_hum dst))
-      >>= fun () -> drain_n_push ()
-    in
-    Lwt.async (fun () -> drain_n_push ());
-    Lwt.return_unit
+  
 end
 
 
@@ -187,6 +198,32 @@ module Main (S: STACKV4)
       n1 e1 a1 i1 u1
       n2 e2 a2 i2 u2
     =
+
+    let fd = Lwt_unix.(socket PF_UNIX SOCK_STREAM 0) in
+
+    let path = "/var/tmp/bridge" in
+    let addr = Lwt_unix.ADDR_UNIX path in
+    Lwt_unix.connect fd addr >>= fun () ->
+    let ch = Lwt_io.(of_fd ~mode:output fd) in
+
+    let fn buf =
+      let f () =
+        Lwt_io.write ch (Cstruct.to_string buf)
+        >>= fun () -> Log.info (fun m -> m "write a packet")
+      in
+      let f_exn e =
+        Log.err (fun m -> m "write err: %s" @@ Printexc.to_string e)
+      in
+      Lwt.catch f f_exn
+    in
+
+    Lwt.join [
+      S0.drain_pkts n0 fn ();
+      S1.drain_pkts n1 fn ();
+      S2.drain_pkts n2 fn ();
+    ]
+
+  (*
     S0.create n0 e0 a0 i0 >>= fun (ep0, d0, s0) ->
     S1.create n1 e1 a1 i1 >>= fun (ep1, d1, s1) ->
     S2.create n2 e2 a2 i2 >>= fun (ep2, d2, s2) ->
@@ -200,7 +237,7 @@ module Main (S: STACKV4)
       d0 (); s0 ();
       d1 (); s1 ();
       d2 (); s2 ();
-    ]
+    ]*)
   (*module DNS = Dns_resolver_mirage.Make(OS.Time)(S)
     module ICMP0 = Icmpv4.Make(I0)
     module ICMP1 = Icmpv4.Make(I1)*)
