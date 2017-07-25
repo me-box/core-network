@@ -48,6 +48,7 @@ let udp2 = direct_udp ip2
 
 let () =
   let packages = [
+    package "uuidm";
     package ~sublibs:["mirage"] "dns";
     package ~sublibs:["lwt"]    "logs";
     package ~sublibs:["icmpv4"] "tcpip";

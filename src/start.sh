@@ -11,7 +11,7 @@ opam pin add -n -y mirage-net-unix https://github.com/sevenEng/mirage-net-psock.
 cd /home/opam/src
 eval `opam config env`
 mirage configure -t unix
-#make depends
+make depends
 
 
 substitute()
@@ -26,9 +26,9 @@ substitute()
 }
 
 
-substitute '"eth1"' '"172.18.0.2\/16"'
-substitute '"eth2"' '"172.19.0.2\/16"'
-substitute '"eth3"' '"172.20.0.2\/16"'
+#substitute '"eth1"' '"172.18.0.2\/16"'
+#substitute '"eth2"' '"172.19.0.2\/16"'
+#substitute '"eth3"' '"172.20.0.2\/16"'
 
 
 #sed -i -e '0,/(Key_gen.interface ())/s/(Key_gen.interface ())/"eth1"/' main.ml

@@ -10,5 +10,7 @@ PKG tcpip.tcp
 PKG ipaddr
 PKG mirage-unix
 PKG dns
+PKG mirage-channel
+PKG uuidm
 
 S src

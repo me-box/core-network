@@ -178,7 +178,171 @@ end
 
 module Vmnetd = struct
 
-  
+  let error_of_failure f = Lwt.catch f (fun e -> Lwt_result.fail (`Msg (Printexc.to_string e)))
+
+  module Init = struct
+
+    type t = {
+      magic: string;
+      version: int32;
+      commit: string;
+    }
+
+    let to_string t =
+      Printf.sprintf "{ magic = %s; version = %ld; commit = %s }" t.magic t.version t.commit
+
+    let sizeof = 5 + 4 + 40
+
+    let default = {
+      magic = "VMN3T";
+      version = 1l;
+      commit = "0123456789012345678901234567890123456789";
+    }
+
+    let marshal t rest =
+      Cstruct.blit_from_string t.magic 0 rest 0 5;
+      Cstruct.LE.set_uint32 rest 5 t.version;
+      Cstruct.blit_from_string t.commit 0 rest 9 40;
+      Cstruct.shift rest sizeof
+
+    let unmarshal rest =
+      let magic = Cstruct.(to_string @@ sub rest 0 5) in
+      let version = Cstruct.LE.get_uint32 rest 5 in
+      let commit = Cstruct.(to_string @@ sub rest 9 40) in
+      let rest = Cstruct.shift rest sizeof in
+      Result.Ok ({ magic; version; commit }, rest)
+  end
+
+  module Command = struct
+
+    type t =
+      | Ethernet of Uuidm.t (* 36 bytes *)
+      | Bind_ipv4 of Ipaddr.V4.t * int * bool
+
+    let to_string = function
+    | Ethernet x -> "Ethernet " ^ (Uuidm.to_string x)
+    | Bind_ipv4 (ip, port, tcp) -> "Bind_ipv4 " ^ (Ipaddr.V4.to_string ip) ^ " " ^ (string_of_int port) ^ " " ^ (string_of_bool tcp)
+
+    let sizeof = 1 + 36
+
+    let marshal t rest = match t with
+    | Ethernet uuid ->
+        Cstruct.set_uint8 rest 0 1;
+        let rest = Cstruct.shift rest 1 in
+        let uuid_str = Uuidm.to_string uuid in
+        Cstruct.blit_from_string uuid_str 0 rest 0 (String.length uuid_str);
+        Cstruct.shift rest (String.length uuid_str)
+    | Bind_ipv4 (ip, port, stream) ->
+        Cstruct.set_uint8 rest 0 6;
+        let rest = Cstruct.shift rest 1 in
+        Cstruct.LE.set_uint32 rest 0 (Ipaddr.V4.to_int32 ip);
+        let rest = Cstruct.shift rest 4 in
+        Cstruct.LE.set_uint16 rest 0 port;
+        let rest = Cstruct.shift rest 2 in
+        Cstruct.set_uint8 rest 0 (if stream then 0 else 1);
+        Cstruct.shift rest 1
+
+    let unmarshal rest =
+      match Cstruct.get_uint8 rest 0 with
+      | 1 ->
+          let uuid_str = Cstruct.(to_string (sub rest 1 36)) in
+          let rest = Cstruct.shift rest 37 in
+          if Bytes.(compare (make 36 '\000') (of_string uuid_str)) = 0 then
+            begin
+              let random_uuid = (Uuidm.v `V4) in
+              Log.info (fun f -> f "Generated UUID on behalf of client: %s" (Uuidm.to_string random_uuid))
+              |> Lwt.ignore_result;
+              Result.Ok (Ethernet random_uuid, rest) (* generate random uuid on behalf of client if client sent array of \0 *)
+            end else  begin
+            let result = match (Uuidm.of_string uuid_str) with (* parse uuid from client *)
+            | Some uuid -> begin
+                Result.Ok (Ethernet uuid, rest)
+              end
+            | None -> Result.Error (`Msg (Printf.sprintf "Invalid UUID: %s" uuid_str))
+            in
+            result
+          end
+      | n -> Result.Error (`Msg (Printf.sprintf "Unknown command: %d" n))
+
+  end
+
+  module Vif = struct
+
+    type t = {
+      mtu: int;
+      max_packet_size: int;
+      client_macaddr: Macaddr.t;
+    }
+
+    let to_string t = Printf.sprintf "{ mtu = %d; max_packet_size = %d; client_macaddr = %s }" t.mtu t.max_packet_size (Macaddr.to_string t.client_macaddr)
+
+    let create client_macaddr mtu () =
+      let max_packet_size = mtu + 50 in
+      { mtu; max_packet_size; client_macaddr }
+
+    let sizeof = 2 + 2 + 6
+
+    let marshal t rest =
+      Cstruct.LE.set_uint16 rest 0 t.mtu;
+      Cstruct.LE.set_uint16 rest 2 t.max_packet_size;
+      Cstruct.blit_from_string (Macaddr.to_bytes t.client_macaddr) 0 rest 4 6;
+      Cstruct.shift rest sizeof
+
+    let unmarshal rest =
+      let mtu = Cstruct.LE.get_uint16 rest 0 in
+      let max_packet_size = Cstruct.LE.get_uint16 rest 2 in
+      let mac = Cstruct.(to_string @@ sub rest 4 6) in
+      try
+        let client_macaddr = Macaddr.of_bytes_exn mac in
+        Result.Ok ({ mtu; max_packet_size; client_macaddr }, Cstruct.shift rest sizeof)
+      with _ ->
+        Result.Error (`Msg (Printf.sprintf "Failed to parse MAC: [%s]" mac))
+
+  end
+
+
+  let client_negotiate ~uuid ~in_ch ~out_ch =
+  error_of_failure
+    (fun () ->
+      let open Lwt.Infix in
+      let buf = Cstruct.create Init.sizeof in
+      let (_: Cstruct.t) = Init.marshal Init.default buf in
+      Lwt_io.write out_ch (Cstruct.to_string buf) >>= fun () ->
+      Lwt_io.flush out_ch >>= fun () ->
+
+      let in_buf = Bytes.make Init.sizeof '0' in
+      Lwt_io.read_into_exactly in_ch in_buf 0 Init.sizeof >>= fun () ->
+      let buf = Cstruct.of_bytes in_buf in
+      let open Lwt_result.Infix in
+      Lwt.return (Init.unmarshal buf) >>= fun (init, _) ->
+      let open Lwt.Infix in
+      Log.info (fun f -> f "Client.negotiate: received %s" (Init.to_string init)) >>= fun () ->
+      let buf = Cstruct.create Command.sizeof in
+      let (_: Cstruct.t) = Command.marshal (Command.Ethernet uuid) buf in
+      Lwt_io.write out_ch (Cstruct.to_string buf) >>= fun () ->
+      Lwt_io.flush out_ch >>= fun () ->
+
+      let in_buf = Bytes.make Vif.sizeof '0' in
+      Lwt_io.read_into_exactly in_ch in_buf 0 Vif.sizeof >>= fun () ->
+      let buf = Cstruct.of_bytes in_buf in
+      let open Lwt_result.Infix in
+      Lwt.return (Vif.unmarshal buf)
+      >>= fun (vif, _) ->
+      Lwt.ignore_result @@ Log.debug (fun f -> f "Client.negotiate: vif %s" (Vif.to_string vif));
+      Lwt_result.return (vif)
+    )
+
+
+  module Packet = struct
+    let sizeof = 2
+
+    let marshal t rest =
+      Cstruct.LE.set_uint16 rest 0 t
+
+    let unmarshal rest =
+      let t = Cstruct.LE.get_uint16 rest 0 in
+      Result.Ok (t, Cstruct.shift rest sizeof)
+  end
 end
 
 
@@ -203,25 +367,36 @@ module Main (S: STACKV4)
 
     let path = "/var/tmp/bridge" in
     let addr = Lwt_unix.ADDR_UNIX path in
+
+    let in_ch = Lwt_io.(of_fd ~mode:input fd) in
+    let out_ch = Lwt_io.(of_fd ~mode:output fd) in
+
     Lwt_unix.connect fd addr >>= fun () ->
-    let ch = Lwt_io.(of_fd ~mode:output fd) in
+    let uuid = Uuidm.create `V4 in
+    Vmnetd.client_negotiate ~uuid ~in_ch ~out_ch >>= function
+    | Error (`Msg msg) ->
+        Log.err (fun m -> m "connection failed: %s" msg)
+    | Ok vif ->
+        Log.info (fun m -> m "connection success as client:%s"
+          @@ Macaddr.to_string vif.Vmnetd.Vif.client_macaddr) >>= fun () ->
 
-    let fn buf =
-      let f () =
-        Lwt_io.write ch (Cstruct.to_string buf)
-        >>= fun () -> Log.info (fun m -> m "write a packet")
-      in
-      let f_exn e =
-        Log.err (fun m -> m "write err: %s" @@ Printexc.to_string e)
-      in
-      Lwt.catch f f_exn
-    in
+        let fn buf =
+          let f () =
+            Lwt_io.write out_ch (Cstruct.to_string buf) >>= fun () ->
+            Lwt_io.flush out_ch >>= fun () ->
+            Log.info (fun m -> m "write a packet %d" (Cstruct.len buf))
+          in
+          let f_exn e =
+            Log.err (fun m -> m "write err: %s" @@ Printexc.to_string e)
+          in
+          Lwt.catch f f_exn
+        in
 
-    Lwt.join [
-      S0.drain_pkts n0 fn ();
-      S1.drain_pkts n1 fn ();
-      S2.drain_pkts n2 fn ();
-    ]
+        Lwt.join [
+          S0.drain_pkts n0 fn ();
+          S1.drain_pkts n1 fn ();
+          S2.drain_pkts n2 fn ();
+        ]
 
   (*
     S0.create n0 e0 a0 i0 >>= fun (ep0, d0, s0) ->
