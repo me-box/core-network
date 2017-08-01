@@ -54,8 +54,10 @@ module Dispatcher = struct
 end
 
 
-module STACK (N: NETWORK)(E: ETHIF)(A: ARP)(I: IPV4) = struct
+(*
+module STACK (N: NETWORK) = struct
 
+  (*
   let create n e a i =
     let in_s, in_push = Lwt_stream.create () in
     let out_s, out_push = Lwt_stream.create () in
@@ -166,7 +168,7 @@ module STACK (N: NETWORK)(E: ETHIF)(A: ARP)(I: IPV4) = struct
 
     let port = Ipaddr.V4.Prefix.make netmask @@ List.hd @@ I.get_ip i in
     Lwt.return ({port; pkt_in = in_s; push_pkt = out_push},
-                stack_driver, write_loop)
+                stack_driver, write_loop)*)
 
   let rec drain_pkts n fn () =
     N.listen n fn >>= (function
@@ -174,7 +176,8 @@ module STACK (N: NETWORK)(E: ETHIF)(A: ARP)(I: IPV4) = struct
         | Error err -> Log.err (fun m -> m "[net] error: %a" N.pp_error err))
     >>= drain_pkts n fn
 
-end
+end *)
+
 
 module Vmnetd = struct
 
@@ -346,27 +349,18 @@ module Vmnetd = struct
 end
 
 
-module Main (S: STACKV4)
-    (N0: NETWORK) (E0: ETHIF) (A0: ARP) (I0: IPV4) (U0: UDPV4)
-    (N1: NETWORK) (E1: ETHIF) (A1: ARP) (I1: IPV4) (U1: UDPV4)
-    (N2: NETWORK) (E2: ETHIF) (A2: ARP) (I2: IPV4) (U2: UDPV4)
-= struct
+module CONNECTOR(N: NETWORK) = struct
 
-  module S0 = STACK(N0)(E0)(A0)(I0)
-  module S1 = STACK(N1)(E1)(A1)(I1)
-  module S2 = STACK(N2)(E2)(A2)(I2)
+  let rec drain_pkts n fn () =
+    N.listen n fn >>= (function
+      | Ok () -> Lwt.return_unit
+      | Error err -> Log.err (fun m -> m "[net] error: %a" N.pp_error err))
+    >>= drain_pkts n fn
 
 
-  let start s
-      n0 e0 a0 i0 u0
-      n1 e1 a1 i1 u1
-      n2 e2 a2 i2 u2
-    =
-
+  let connect n addr =
     let fd = Lwt_unix.(socket PF_UNIX SOCK_STREAM 0) in
-
-    let path = "/var/tmp/bridge" in
-    let addr = Lwt_unix.ADDR_UNIX path in
+    let addr = Lwt_unix.ADDR_UNIX addr in
 
     let in_ch = Lwt_io.(of_fd ~mode:input fd) in
     let out_ch = Lwt_io.(of_fd ~mode:output fd) in
@@ -377,26 +371,93 @@ module Main (S: STACKV4)
     | Error (`Msg msg) ->
         Log.err (fun m -> m "connection failed: %s" msg)
     | Ok vif ->
-        Log.info (fun m -> m "connection success as client:%s"
-          @@ Macaddr.to_string vif.Vmnetd.Vif.client_macaddr) >>= fun () ->
-
-        let fn buf =
-          let f () =
+        let wfn buf =
+          let f buf () =
+            let hd = Cstruct.create Vmnetd.Packet.sizeof in
+            Vmnetd.Packet.marshal (Cstruct.len buf) hd;
+            Lwt_io.write out_ch (Cstruct.to_string hd) >>= fun () ->
             Lwt_io.write out_ch (Cstruct.to_string buf) >>= fun () ->
             Lwt_io.flush out_ch >>= fun () ->
-            Log.info (fun m -> m "write a packet %d" (Cstruct.len buf))
+            let b = Buffer.create 128 in
+            Cstruct.hexdump_to_buffer b buf;
+            Log.info (fun m -> m "write a packet %d\n%s" (Cstruct.len buf) (Buffer.contents b))
           in
           let f_exn e =
             Log.err (fun m -> m "write err: %s" @@ Printexc.to_string e)
           in
-          Lwt.catch f f_exn
+
+          (* set src to client_macaddr *)
+          let src_mac = Macaddr.to_bytes vif.Vmnetd.Vif.client_macaddr in
+          let orig_src =
+            Cstruct.sub buf 6 6 |> Cstruct.to_string
+            |> Macaddr.of_bytes
+            |> function
+            | Some addr -> Macaddr.to_string addr
+            | None -> "none" in
+          Cstruct.blit_from_string src_mac 0 buf 6 6;
+          Log.info (fun m -> m "before write to vpnkit src %s -> %s" orig_src src_mac) >>= fun () ->
+
+          Lwt.catch (f buf) f_exn
+        in
+
+        let rec rt () =
+          let hd = Bytes.create Vmnetd.Packet.sizeof in
+          Lwt_io.read_into_exactly in_ch hd 0 Vmnetd.Packet.sizeof >>= fun () ->
+          let len =
+            match Vmnetd.Packet.unmarshal @@ Cstruct.of_bytes hd with
+            | Ok (len, _) -> len
+            | _ -> 0
+          in
+          let buf = Bytes.create len in
+          Lwt_io.read_into_exactly in_ch buf 0 len >>= fun () ->
+          let fr = Cstruct.of_bytes buf in
+
+          let dst_mac = Macaddr.to_bytes @@ N.mac n in
+          let orig_dst =
+            Cstruct.sub fr 0 6 |> Cstruct.to_string
+            |> Macaddr.of_bytes
+            |> function
+            | Some addr -> Macaddr.to_string addr
+            | None -> "none" in
+          Cstruct.blit_from_string dst_mac 0 fr 0 6;
+          Log.info (fun m -> m "before write to netif dst %s -> %s" orig_dst dst_mac) >>= fun () ->
+
+          N.write n fr >>= function
+          | Ok () -> rt ()
+          | Error err -> Log.err (fun m -> m "write error: %a" N.pp_error err) >>= rt
         in
 
         Lwt.join [
-          S0.drain_pkts n0 fn ();
-          S1.drain_pkts n1 fn ();
-          S2.drain_pkts n2 fn ();
+          drain_pkts n wfn ();
+          rt ();
         ]
+end
+
+
+module Main (S: STACKV4)
+    (N0: NETWORK)
+    (N1: NETWORK)
+    (N2: NETWORK) (* (E2: ETHIF) (A2: ARP) (I2: IPV4) (U2: UDPV4) *)
+= struct
+
+  module S0 = CONNECTOR(N0)
+  module S1 = CONNECTOR(N1)
+  module S2 = CONNECTOR(N2)
+
+
+  let start s
+      n0
+      n1
+      n2
+    =
+
+    let path = "/var/tmp/bridge" in
+
+    Lwt.join [
+      S0.connect n0 path;
+      S1.connect n1 path;
+      S2.connect n2 path;
+    ]
 
   (*
     S0.create n0 e0 a0 i0 >>= fun (ep0, d0, s0) ->
