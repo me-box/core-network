@@ -14,3 +14,6 @@ PKG mirage-channel
 PKG uuidm
 
 S src
+S src/connector
+B src/_build
+B src/connector/_build
