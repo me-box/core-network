@@ -1,0 +1,3 @@
+(library
+  ((name proto)
+   (libraries (lwt lwt.unix logs logs.lwt cstruct ipaddr))))

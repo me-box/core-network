@@ -1,4 +1,4 @@
-open Lwt
+open Lwt.Infix
 open Mirage_types_lwt
 
 let connector = Logs.Src.create "connector" ~doc:"Network Connector"
