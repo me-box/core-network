@@ -9,12 +9,12 @@ set_up()
     docker network create br-noop
 
     #start bridge
-    docker run -it --detach --name br --rm --cap-add NET_ADMIN unikernel/mirage
+    docker run -it --detach --name br --rm --cap-add NET_ADMIN \
+	   -v /home/qli/workspace/databox-bridge/src:/home/mebox/src:rw seveneng/opam:with-mirage
     docker network disconnect bridge br
     docker network connect br-app br
     docker network connect br-store br
     docker network connect br-noop br
-
 
     APP_DNS_GW=$(docker inspect br | python container_ip.py br-app)
     STORE_DNS_GW=$(docker inspect br | python container_ip.py br-store)

@@ -2,5 +2,5 @@
 
 (executable
   ((name bridge)
-    (libraries (cstruct lwt lwt.unix logs logs.lwt ipaddr proto))
+    (libraries (cstruct lwt lwt.unix logs logs.lwt logs.fmt ipaddr proto dns))
     (preprocess no_preprocessing)))

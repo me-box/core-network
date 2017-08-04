@@ -13,7 +13,9 @@ type endpoint = {
   ip_addr  : Ipaddr.V4.t;
 }
 
+
 let sizeof_endp = 8 + 6 + 4
+
 
 let marshal_endp {interface; mac_addr; ip_addr} buf =
   let intf =
@@ -26,6 +28,7 @@ let marshal_endp {interface; mac_addr; ip_addr} buf =
   Cstruct.blit_from_bytes (Bytes.of_string @@ Macaddr.to_bytes mac_addr) 0 buf 8 6;
   Cstruct.blit_from_bytes (Bytes.of_string @@ Ipaddr.V4.to_bytes ip_addr) 0 buf (8 + 6) 4;
   Cstruct.shift buf sizeof_endp
+
 
 let unmarshal_endp buf =
   let interface =
@@ -105,7 +108,7 @@ module Server = struct
 
     let s = Lwt_unix.(socket PF_UNIX SOCK_STREAM 0) in
     Lwt.catch (fun () ->
-        Lwt_unix.(Versioned.bind_2 s @@ ADDR_UNIX path) >>= fun () ->
+        Lwt_unix.(bind s @@ ADDR_UNIX path) >>= fun () ->
         Lwt.return s)
       (fun e ->
          Lwt_unix.close s >>= fun () ->

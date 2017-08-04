@@ -5,7 +5,7 @@ let bridge_socket =
   Key.(create "socket_path" Arg.(opt string "/var/tmp/bridge" doc))
 
 
-let net = netif "eth0"
+let net = netif "eth1"
 let ethif = etif net
 let arp = arp ethif
 let ip =
@@ -16,7 +16,7 @@ let ip =
   create_ipv4 ~config ethif arp
 
 
-let main = foreign "Connector.Make" (network @-> ipv4 @-> job)
+let main = foreign "Connector.Make" (ethernet @-> arpv4 @-> ipv4 @-> job)
 
 
 let () =
@@ -24,6 +24,7 @@ let () =
     Key.abstract bridge_socket
   ] in
   let packages = [
-    package ~sublibs:["lwt"] "logs"
+    package ~sublibs:["lwt"] "logs";
+    package ~sublibs:["ipv4"; "unix"] "tcpip";
   ] in
-  register ~packages ~keys "network" [main $ net $ ip]
+  register ~packages ~keys "network" [main $ ethif $ arp $ ip]
