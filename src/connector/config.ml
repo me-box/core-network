@@ -16,7 +16,7 @@ let ip =
   create_ipv4 ~config ethif arp
 
 
-let main = foreign "Connector.Make" (ethernet @-> arpv4 @-> ipv4 @-> job)
+let main = foreign "Connector.Make" (network @-> ethernet @-> arpv4 @-> ipv4 @-> job)
 
 
 let () =
@@ -25,6 +25,7 @@ let () =
   ] in
   let packages = [
     package ~sublibs:["lwt"] "logs";
-    package ~sublibs:["ipv4"; "unix"] "tcpip";
+    package ~sublibs:["ipv4"; "ethif"] "tcpip";
   ] in
-  register ~packages ~keys "network" [main $ ethif $ arp $ ip]
+  register ~packages ~keys "connector" [main $ net $ ethif $ arp $ ip]
+

@@ -7,37 +7,96 @@ let hexdump_buf_debug buf =
   Log.debug (fun m ->
       let b = Buffer.create 128 in
       Cstruct.hexdump_to_buffer b buf;
-      m "sent pkt(%d):%s" (Buffer.length b) (Buffer.contents b))
+      m "len:%d pkt:%s" (Cstruct.len buf) (Buffer.contents b))
 
-let is_dns_query = let open Frame in function
-  | Ipv4 { payload = Udp { dst = 53; _ }; _ }
-  | Ipv4 { payload = Tcp { dst = 53; _ }; _ } -> true
-  | _ -> false
+module Dns_service = struct
 
-let names_of_query = let open Frame in function
-  | Ipv4 { payload = Udp { dst = 53; payload = Payload buf}}
-  | Ipv4 { payload = Tcp { dst = 53; payload = Payload buf}} ->
-      let open Dns.Packet in
-      let query = parse buf in
-      List.map (fun {q_name; _} -> Dns.Name.to_string q_name) query.questions
-  | _ -> []
+  let is_dns_query = let open Frame in function
+    | Ipv4 { payload = Udp { dst = 53; _ }; _ }
+    | Ipv4 { payload = Tcp { dst = 53; _ }; _ } -> true
+    | _ -> false
 
-let ip_of_name n =
-  let open Lwt_unix in
-  gethostbyname n >>= fun {h_addr_list; _} ->
-  h_addr_list
-  |> Array.to_list
-  |> List.map (fun addr ->
-      Unix.string_of_inet_addr addr
-      |> Ipaddr.V4.of_string_exn)
-  |> fun ips ->
-  if List.length ips <> 1
-  then
-    let ips_str = String.concat " " @@ List.map Ipaddr.V4.to_string ips in
-    Log.warn (fun m -> m "found ip for %s: %s" n ips_str) >>= fun () ->
+  let query_of_pkt = let open Frame in function
+    | Ipv4 { payload = Udp { dst = 53; payload = Payload buf}}
+    | Ipv4 { payload = Tcp { dst = 53; payload = Payload buf}} ->
+        let open Dns.Packet in
+        Lwt.catch (fun () -> Lwt.return @@ parse buf) (fun e ->
+            Log.err (fun m -> m "dns packet parse err!")
+            >>= fun () -> Lwt.fail e)
+    | _ -> Lwt.fail (Invalid_argument "Not dns query")
+
+
+  let ip_of_name n =
+    let open Lwt_unix in
+    (*using system resolver*)
+    gethostbyname n >>= fun {h_addr_list; _} ->
+    h_addr_list
+    |> Array.to_list
+    |> List.map (fun addr ->
+        Unix.string_of_inet_addr addr
+        |> Ipaddr.V4.of_string_exn)
+    |> fun ips ->
+    if List.length ips <> 1
+    then
+      let ips_str = String.concat " " @@ List.map Ipaddr.V4.to_string ips in
+      Log.warn (fun m -> m "found ip for %s: %s" n ips_str) >>= fun () ->
+      Lwt.return @@ List.hd ips
+    else
     Lwt.return @@ List.hd ips
-  else
-  Lwt.return @@ List.hd ips
+
+
+  let to_dns_response t pkt resp =
+    let open Frame in
+    match pkt with
+    | Ipv4 {src = dst; dst = src; payload = Udp {src = dst_port; dst = src_port; _}; _}
+    | Ipv4 {src = dst; dst = src; payload = Tcp {src = dst_port; dst = src_port; _}; _} ->
+        let payload_len = Udp_wire.sizeof_udp + Cstruct.len resp in
+
+        let ip_hd = Ipv4_packet.{options = Cstruct.create 0; src; dst; ttl = 38; proto = Marshal.protocol_to_int `UDP} in
+        let ip_hd_wire = Cstruct.create Ipv4_wire.sizeof_ipv4 in
+        (match Ipv4_packet.Marshal.into_cstruct ~payload_len ip_hd ip_hd_wire with
+        | Error e -> raise @@ Failure "to_response_pkt -> into_cstruct"
+        | Ok () ->
+            Ipv4_wire.set_ipv4_id ip_hd_wire (Random.int 65535);
+            Ipv4_wire.set_ipv4_csum ip_hd_wire 0;
+            let cs = Tcpip_checksum.ones_complement ip_hd_wire in
+            Ipv4_wire.set_ipv4_csum ip_hd_wire cs;
+
+            let ph = Ipv4_packet.Marshal.pseudoheader ~src ~dst ~proto:`UDP payload_len in
+            let udp_hd = Udp_packet.{src_port; dst_port} in
+            let udp_hd_wire =  Udp_packet.Marshal.make_cstruct ~pseudoheader:ph ~payload:resp  udp_hd in
+
+            let buf_resp = Cstruct.concat [ip_hd_wire; udp_hd_wire; resp] in
+            let pkt_resp =
+              match Frame.parse_ipv4_pkt buf_resp with
+              | Ok fr -> fr
+              | Error (`Msg msg) ->
+                  Log.err (fun m -> m "dispatch -> parse_eth_payload: %s" msg) |> Lwt.ignore_result;
+                  assert false
+            in
+            buf_resp, pkt_resp)
+    | _ -> assert false
+
+
+  let process_dns_query ~predicate pkt =
+    let open Dns in
+    query_of_pkt pkt >>= fun query ->
+    begin
+      let names = Packet.(List.map (fun {q_name; _} -> q_name) query.questions) in
+      let name = List.hd names |> Name.to_string in
+      if predicate name then
+        Log.info (fun m -> m "Dns_service: allowed to resolve %s" name) >>= fun () ->
+        ip_of_name name >>= fun resolved ->
+        let name = Dns.Name.of_string name in
+        let rrs = Dns.Packet.[{ name; cls = RR_IN; flush = false; ttl = 0l; rdata = A resolved }] in
+        Lwt.return Dns.Query.({ rcode = NoError; aa = true; answer = rrs; authority = []; additional = []})
+      else
+      Log.info (fun m -> m "Dns_service: banned to resolve %s" name) >>= fun () ->
+      Lwt.return Query.({rcode = Packet.NXDomain; aa = true; answer = []; authority = []; additional = []})
+    end >>= fun answer ->
+    let resp = Query.response_of_answer query answer in
+    Lwt.return @@ Packet.marshal resp
+end
 
 
 module RMap = Map.Make(struct
@@ -82,17 +141,19 @@ module Policy = struct
 
 
   let allow_pair t nx ny =
-    ip_of_name nx >>= fun ipx ->
-    ip_of_name ny >>= fun ipy ->
+    Dns_service.ip_of_name nx >>= fun ipx ->
+    Dns_service.ip_of_name ny >>= fun ipy ->
     t.transport <- t.transport |> PSet.add (ipx, ipy);
     t.resolve <- t.resolve |> allow_resolve ipx ny |> allow_resolve ipy nx;
+    Log.info (fun m -> m "Policy.allow %s <> %s" nx ny) >>= fun () ->
     Lwt.return_unit
 
   let forbidden_pair t nx ny =
-    ip_of_name nx >>= fun ipx ->
-    ip_of_name ny >>= fun ipy ->
+    Dns_service.ip_of_name nx >>= fun ipx ->
+    Dns_service.ip_of_name ny >>= fun ipy ->
     t.transport <- t.transport |> PSet.remove (ipx, ipy);
     t.resolve <- t.resolve |> forbidden_resolve ipx ny |> forbidden_resolve ipy nx;
+    Log.info (fun m -> m "Policy.forbidden %s <> %s" nx ny) >>= fun () ->
     Lwt.return_unit
 
   let is_authorized_transport {transport; _} ipx ipy =
@@ -123,52 +184,87 @@ module Dispatcher = struct
     route_cache: (Ipaddr.V4.t, Proto.endpoint) Hashtbl.t;
   }
 
-(*
-  let count_in_pkts intf in_s cnt_ref =
-    let rec aux () =
-      Lwt_stream.get in_s >>= function
-      | Some (_, fr) ->
-          Log.debug (fun m -> m "a pkt from %s" intf) >>= fun () ->
-          incr cnt_ref; aux ()
-      | None ->
-          Log.warn (fun m -> m "%s incoming stream closed?!" intf)
-          >>= Lwt.return
-    in
-    aux ()
-*)
-
   let better_endpoint ip endpx endpy =
     let matched_prefix ipx ipy =
       Int32.logxor (Ipaddr.V4.to_int32 ipx) (Ipaddr.V4.to_int32 ipy)
     in
-    (*smaller is better, ASSUMING highest bit are all the same*)
-    if Int32.compare (matched_prefix ip endpx) (matched_prefix ip endpy) < 0 then endpx
+    (*smaller is better, ASSUMING highest bit(s) are all the same*)
+    if Int32.compare
+        (matched_prefix ip endpx.Proto.ip_addr)
+        (matched_prefix ip endpy.Proto.ip_addr) < 0
+    then endpx
     else endpy
 
   let find_push_endpoint {endpoints; route_cache} ip =
     if Hashtbl.mem route_cache ip then Hashtbl.find route_cache ip
     else begin
-      (*find current best outgoing endpoint*)
-      (*add to the cache, then return*)
+      let local_endp = Proto.{
+          interface = "local";
+          mac_addr = Macaddr.broadcast; (*blah*)
+          ip_addr = Ipaddr.V4.localhost;
+        } in
+      EndpMap.fold (fun endp _ push_endp ->
+          better_endpoint ip endp push_endp) endpoints local_endp
+      |> fun push_endpoint ->
+      Hashtbl.replace route_cache ip push_endpoint;
+      push_endpoint
     end
 
 
-  let register_endpoint t endp in_s push_out =
+  let dispatch t po endp (buf, pkt) =
+    let src_ip, dst_ip = let open Frame in match pkt with
+      | Ipv4 {src; dst; _} -> src, dst
+      | _ ->
+          Log.err (fun m -> m "Dispathcer: dispatch %s" (Frame.fr_info pkt)) |> Lwt.ignore_result;
+          assert false in
+    if Dns_service.is_dns_query pkt then
+      Log.info (fun m -> m "Dispatcher: a dns query from %a" Ipaddr.V4.pp_hum src_ip) >>= fun () ->
+      let predicate = Policy.is_authorized_resolve po src_ip in
+      Dns_service.process_dns_query ~predicate pkt >>= fun resp ->
+      let resp_buf, resp_pkt = Dns_service.to_dns_response t pkt resp in
+      let _, push_fn = EndpMap.find endp t.endpoints in
+      push_fn @@ Some (resp_buf, resp_pkt);
+      Lwt.return_unit
+    else if Policy.is_authorized_transport po src_ip dst_ip then
+      Log.debug (fun m -> m "Dispatcher: allowed pkt %a -> %a" Ipaddr.V4.pp_hum src_ip Ipaddr.V4.pp_hum dst_ip) >>= fun () ->
+      let push_endp = find_push_endpoint t dst_ip in
+      let _, push_fn = EndpMap.find push_endp t.endpoints in
+      push_fn @@ Some (buf, pkt);
+      Lwt.return_unit
+    else Log.warn (fun m -> m "Dispatcher: dropped pkt %a -> %a" Ipaddr.V4.pp_hum src_ip Ipaddr.V4.pp_hum dst_ip)
+
+
+  let register_endpoint t po endp in_s push_out =
     if not @@ EndpMap.mem endp t.endpoints then
-      t.endpoints <- EndpMap.add endp (in_s, push_out) t.endpoints
+      t.endpoints <- EndpMap.add endp (in_s, push_out) t.endpoints;
+    let rec drain_pkt () =
+      Lwt_stream.get in_s >>= function
+      | Some (buf, pkt) ->
+          dispatch t po endp (buf, pkt)
+          >>= drain_pkt
+      | None ->
+          Log.warn (fun m -> m "endpoint %s closed?!" @@ Proto.endp_to_string endp)
+    in
+    (*need a handle here*)
+    Lwt.async drain_pkt
+
 
   let create ()  =
     let endpoints = EndpMap.empty  in
     let route_cache = Hashtbl.create 7 in
     {endpoints; route_cache}
+end
 
+
+module Server = struct
+  
 end
 
 
 let rec from_endpoint conn push_in =
   Proto.Server.recv conn >>= fun buf ->
-  hexdump_buf_debug buf >>= fun () ->
-  Frame.parse buf |> function
+  (*hexdump_buf_debug buf >>= fun () ->*)
+  Frame.parse_ipv4_pkt buf |> function
   | Ok fr ->
       push_in @@ Some (buf, fr);
       from_endpoint conn push_in
@@ -190,11 +286,12 @@ let main path =
   Proto.Server.bind path >>= fun server ->
 
   let disp = Dispatcher.create () in
+  let policy = Policy.create () in
   let serve_endp endp conn =
     let in_s, push_in = Lwt_stream.create () in
     let out_s, push_out = Lwt_stream.create () in
     Log.info (fun m -> m "client %s made connection!" @@ Proto.endp_to_string endp) >>= fun () ->
-    Dispatcher.register_endpoint disp endp in_s push_out >>= fun () ->
+    Dispatcher.register_endpoint disp policy endp in_s push_out;
     Lwt.pick [
       from_endpoint conn push_in;
       to_endpoint conn out_s
@@ -203,6 +300,7 @@ let main path =
   Proto.Server.listen server serve_endp >>= fun () ->
   let t, _ = Lwt.task () in
   t
+
 
 let () =
   let path = Sys.argv.(1) in

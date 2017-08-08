@@ -5,21 +5,21 @@ let connector = Logs.Src.create "connector" ~doc:"Network Connector"
 module Log = (val Logs_lwt.src_log connector : Logs_lwt.LOG)
 
 
-module Make(N: NETWORK)(E: ETHIF)(Arp: ARP)(Ip: IPV4)) = struct
+module Make(N: NETWORK)(E: ETHIF)(Arp: ARP)(Ip: IPV4) = struct
 
   let hexdump_buf_debug buf =
     Log.debug (fun m ->
         let b = Buffer.create 128 in
         Cstruct.hexdump_to_buffer b buf;
-        m "sent pkt(%d):%s" (Buffer.length b) (Buffer.contents b))
+        m "len: %d pkt: %s" (Cstruct.len buf) (Buffer.contents b))
 
   let drop_pkt (_: Cstruct.t) = Lwt.return_unit
 
   let to_bridge conn buf =
     Lwt.catch
       (fun () ->
-         Proto.Client.send conn buf >>= fun () ->
-         hexdump_buf_debug buf)
+         Proto.Client.send conn buf
+         (*>>= fun () -> hexdump_buf_debug buf*))
       (fun e ->
          let msg = Printf.sprintf "to_bridge err: %s" @@ Printexc.to_string e in
          Log.err (fun m -> m "%s" msg) >>= fun () ->
@@ -51,7 +51,7 @@ module Make(N: NETWORK)(E: ETHIF)(Arp: ARP)(Ip: IPV4)) = struct
     let socket_path = Key_gen.socket_path () in
     let intf = Key_gen.interface () in
     let macaddr = E.mac eth in
-    let ipaddr = Ip.get_ip ip |> List.hd |> Ipaddr.V4.of_string_exn in
+    let ipaddr = Ip.get_ip ip |> List.hd in
     let endp = Proto.create_endp intf macaddr ipaddr in
 
     Proto.Client.connect socket_path endp >>= function

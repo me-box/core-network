@@ -13,5 +13,6 @@ type t =
 val parse: Cstruct.t -> (t, [ `Msg of string]) Result.result
 (** [parse buffers] parses the frame in [buffers] *)
 
-val parse_eth_payload: int -> Cstruct.t -> (t, [ `Msg of string]) Result.result
-(** [parse buffers] parses the frame in [buffers] *)
+val parse_ipv4_pkt: Cstruct.t -> (t, [ `Msg of string]) Result.result
+
+val fr_info: t -> string
