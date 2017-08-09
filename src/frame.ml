@@ -92,6 +92,7 @@ let parse buf =
   with e ->
     Error (`Msg ("Failed to parse ethernet frame: " ^ (Printexc.to_string e)))
 
+
 let fr_info = function
 | Ethernet {src; dst; _} -> Printf.sprintf "Ethernet %s ->%s" (Macaddr.to_string src) (Macaddr.to_string dst)
 | Arp {op} -> Printf.sprintf "Arp %s" (match op with `Request -> "request" | `Reply -> "reply" | `Unknown -> "unknown")
