@@ -7,27 +7,35 @@ module Log = (val Logs_lwt.src_log connector : Logs_lwt.LOG)
 
 module Make(N: NETWORK)(E: ETHIF)(Arp: ARP)(Ip: IPV4) = struct
 
-  let hexdump_buf_debug buf =
+  let hexdump_buf_debug desp buf =
     Log.debug (fun m ->
         let b = Buffer.create 128 in
         Cstruct.hexdump_to_buffer b buf;
-        m "len: %d pkt: %s" (Cstruct.len buf) (Buffer.contents b))
+        m "%s len:%d pkt:%s" desp (Cstruct.len buf) (Buffer.contents b))
 
   let drop_pkt (_: Cstruct.t) = Lwt.return_unit
+
+  let is_ipv4_multicast buf =
+    let dst = Cstruct.BE.get_uint32 buf 16 |> Ipaddr.V4.of_int32 in
+    Ipaddr.V4.is_multicast dst
 
   let to_bridge conn buf =
     Lwt.catch
       (fun () ->
+         if is_ipv4_multicast buf
+         then Lwt.return_unit
+         else
          Proto.Client.send conn buf
-         (*>>= fun () -> hexdump_buf_debug buf*))
+         (*>>= fun () -> hexdump_buf_debug "to_bridge" buf*))
       (fun e ->
          let msg = Printf.sprintf "to_bridge err: %s" @@ Printexc.to_string e in
          Log.err (fun m -> m "%s" msg) >>= fun () ->
-         hexdump_buf_debug buf)
+         hexdump_buf_debug "to_bridge" buf)
 
 
   let rec from_bridge eth arp conn =
     Proto.Client.recv conn >>= fun buf ->
+    (*hexdump_buf_debug "from_bridge" buf >>= fun () ->*)
     (*receving ip packet from bridge*)
     let dst_ipaddr = Cstruct.BE.get_uint32 buf 16 |> Ipaddr.V4.of_int32 in
     Arp.query arp dst_ipaddr >>= function

@@ -50,7 +50,12 @@ module Make(Backend: Vnetif.BACKEND) = struct
     let handler = Filter.apply_all [Middleware.filter m] init in
     fun (_: Http.conn) req body ->
       let req = Request.create ~body req in
-      handler req >>= fun {Response.code; headers; body} ->
+      Lwt.catch (fun () -> handler req) (fun e ->
+          Log.err (fun m -> m "handler err: %s" (Printexc.to_string e));
+          let body = Printexc.to_string e in
+          let resp = Response.of_string_body ~code:Cohttp.Code.(`Code 500) body in
+          Lwt.return resp)
+      >>= fun {Response.code; headers; body} ->
       Http.respond ~headers ~body ~status:code ()
 
   let get route action = `GET, Opium_kernel.Route.of_string  route, action
@@ -91,11 +96,13 @@ module Make(Backend: Vnetif.BACKEND) = struct
     Mclock.connect () >>= fun clock ->
     or_fail "A.connect" @@ A.connect ethif clock >>= fun arp ->
     or_fail "I.connect" @@ I.connect ~ip ethif arp >>= fun i ->
+    Lwt.return @@ Stdlibrandom.initialize () >>= fun () ->
     or_fail "Icmp.connect" @@ Icmp.connect i >>= fun icmp ->
     or_fail "U.connect" @@ U.connect i >>= fun u ->
     or_fail "T.connect" @@ T.connect i clock >>= fun t ->
     let config = Mirage_stack_lwt.{name = "REST bridge"; interface = net} in
     or_fail "Tcpip.connect" @@ Tcpip.connect config ethif arp i icmp u t >>= fun tcpip ->
+    Nocrypto_entropy_lwt.initialize () >>= fun () ->
     or_fail "C.connect" @@ C.connect tcpip Conduit_mirage.empty >>= fun c ->
     or_fail "Http.connect" @@ Http.connect c >>= fun start_fn ->
     Lwt.return {net; ip; start_fn}

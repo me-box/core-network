@@ -4,7 +4,7 @@
   ((name bridge)
     (libraries (
      cstruct lwt lwt.unix logs logs.lwt logs.fmt
-     ipaddr dns mirage-http mirage-conduit mirage-unix
+     ipaddr dns mirage-http mirage-conduit mirage-unix nocrypto.lwt
      mirage-vnetif tcpip.ethif tcpip.arpv4 tcpip.ipv4 tcpip.icmpv4 tcpip.tcp tcpip.udp tcpip.stack-direct
      opium_kernel))
     (preprocess no_preprocessing)))

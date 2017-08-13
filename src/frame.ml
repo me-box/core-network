@@ -1,7 +1,7 @@
 
 type t =
   | Ethernet: { src: Macaddr.t; dst: Macaddr.t; payload: t } -> t
-  | Arp:      { op: [ `Request | `Reply | `Unknown ] } -> t
+  | Arp:      { op: [ `Request | `Reply | `Unknown ]; sha: Macaddr.t; spa: Ipaddr.V4.t; tha: Macaddr.t; tpa: Ipaddr.V4.t} -> t
   | Icmp:     { raw: Cstruct.t; payload: t } -> t
   | Ipv4:     { src: Ipaddr.V4.t; dst: Ipaddr.V4.t; dnf: bool; ihl: int; raw: Cstruct.t; payload: t } -> t
   | Udp:      { src: int; dst: int; len: int; payload: t } -> t
@@ -72,6 +72,21 @@ let parse_ipv4_pkt inner =
   >>= fun payload ->
   Ok (Ipv4 { src; dst; dnf; ihl; raw; payload })
 
+let parse_arp_pkt inner =
+  need_space_for inner 2 "ARP header"
+  >>= fun () ->
+  let get_ha buf offset =
+    let raw = Cstruct.sub buf offset 6 in
+    Macaddr.of_bytes_exn @@ Cstruct.to_string raw
+  in
+  let code = Cstruct.BE.get_uint16 inner 6 in
+  let sha = get_ha inner                (6 + 2) in
+  let spa = Cstruct.BE.get_uint32 inner (6 + 2 + 6) |> Ipaddr.V4.of_int32 in
+  let tha = get_ha inner                (6 + 2 + 6 + 4) in
+  let tpa = Cstruct.BE.get_uint32 inner (6 + 2 + 6 + 4 + 6) |> Ipaddr.V4.of_int32 in
+  let op = match code with 1 -> `Request | 2 -> `Reply | _ -> `Unknown in
+  Ok (Arp { op; sha; spa; tha; tpa })
+
 let parse buf =
   try
     need_space_for buf 14 "ethernet frame"
@@ -84,11 +99,15 @@ let parse buf =
     | _, None -> Error (`Msg "failed to parse ethernet source MAC")
     | Some dst, Some src ->
         let inner = Cstruct.shift buf 14 in
-        if ethertype = 0x8000 then
+        if ethertype = 0x0800 then
           parse_ipv4_pkt inner
           >>= fun payload ->
           Ok (Ethernet { src; dst; payload })
-        else Error (`Msg ("Ethernet payload not ipv4 pkt"))
+        else if ethertype = 0x0806 then
+          parse_arp_pkt inner
+          >>= fun payload ->
+          Ok (Ethernet { src; dst; payload})
+        else Error (`Msg ("Ethernet payload not ipv4 or arp pkt"))
   with e ->
     Error (`Msg ("Failed to parse ethernet frame: " ^ (Printexc.to_string e)))
 

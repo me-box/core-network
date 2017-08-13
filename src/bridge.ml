@@ -3,11 +3,11 @@ open Lwt.Infix
 let bridge = Logs.Src.create "bridge" ~doc:"Bridge"
 module Log = (val Logs_lwt.src_log bridge : Logs_lwt.LOG)
 
-let hexdump_buf_debug buf =
+let hexdump_buf_debug desp buf =
   Log.debug (fun m ->
       let b = Buffer.create 128 in
       Cstruct.hexdump_to_buffer b buf;
-      m "len:%d pkt:%s" (Cstruct.len buf) (Buffer.contents b))
+      m "%s len:%d pkt:%s" desp (Cstruct.len buf) (Buffer.contents b))
 
 module Dns_service = struct
 
@@ -181,7 +181,9 @@ module Local = struct
   }
 
   let create service_ip =
-    let backend = Backend.create () in
+    let yield = Lwt_main.yield in
+    let use_async_readers = true in
+    let backend = Backend.create ~yield ~use_async_readers () in
     let id =
       match Backend.register backend with
       | `Ok id -> id
@@ -270,7 +272,10 @@ module Dispatcher = struct
 
   let better_endpoint ip endpx endpy =
     let matched_prefix ipx ipy =
-      Int32.logxor (Ipaddr.V4.to_int32 ipx) (Ipaddr.V4.to_int32 ipy)
+      let mask = Int32.shift_left 1l 31 in
+      let ipx = Int32.logor (Ipaddr.V4.to_int32 ipx) mask in
+      let ipy = Int32.logor (Ipaddr.V4.to_int32 ipy) mask in
+      Int32.logxor ipx ipy
     in
     (*smaller is better, ASSUMING highest bit(s) are all the same*)
     if Int32.compare
@@ -287,8 +292,7 @@ module Dispatcher = struct
           mac_addr = Macaddr.broadcast; (*blah*)
           ip_addr = Ipaddr.V4.localhost;
         } in
-      EndpMap.fold (fun endp _ push_endp ->
-          better_endpoint ip endp push_endp) endpoints local_endp
+      EndpMap.fold (fun endp _ push_endp -> better_endpoint ip endp push_endp) endpoints local_endp
       |> fun push_endpoint ->
       Hashtbl.replace route_cache ip push_endpoint;
       push_endpoint
@@ -296,6 +300,7 @@ module Dispatcher = struct
 
 
   let dispatch t po endp (buf, pkt) =
+    Log.info (fun m -> m "in dispatch %s(%d)" (Frame.fr_info pkt) (Cstruct.len buf)) >>= fun () ->
     let src_ip, dst_ip = let open Frame in match pkt with
       | Ipv4 {src; dst; _} -> src, dst
       | _ ->
@@ -309,17 +314,15 @@ module Dispatcher = struct
       let _, push_fn = EndpMap.find endp t.endpoints in
       push_fn @@ Some (resp_buf, resp_pkt);
       Lwt.return_unit
+    else if Local.is_to_service t.local pkt then
+      Log.debug (fun m -> m "Dispatcher: allowed pkt[local] %a -> %a" Ipaddr.V4.pp_hum src_ip Ipaddr.V4.pp_hum dst_ip) >>= fun () ->
+      Local.write_to_service t.local dispatcher_mac Ethif_wire.IPv4 buf
     else if Policy.is_authorized_transport po src_ip dst_ip then
-      if Local.is_to_service t.local pkt then
-        Log.debug (fun m -> m "Dispatcher: allowed pkt[local] %a -> %a" Ipaddr.V4.pp_hum src_ip Ipaddr.V4.pp_hum dst_ip) >>= fun () ->
-        Local.write_to_service t.local dispatcher_mac Ethif_wire.IPv4 buf
-      else begin
-        Log.debug (fun m -> m "Dispatcher: allowed pkt %a -> %a" Ipaddr.V4.pp_hum src_ip Ipaddr.V4.pp_hum dst_ip) >>= fun () ->
-        let push_endp = find_push_endpoint t dst_ip in
-        let _, push_fn = EndpMap.find push_endp t.endpoints in
-        push_fn @@ Some (buf, pkt);
-        Lwt.return_unit
-      end
+      Log.debug (fun m -> m "Dispatcher: allowed pkt %a -> %a" Ipaddr.V4.pp_hum src_ip Ipaddr.V4.pp_hum dst_ip) >>= fun () ->
+      let push_endp = find_push_endpoint t dst_ip in
+      let _, push_fn = EndpMap.find push_endp t.endpoints in
+      push_fn @@ Some (buf, pkt);
+      Lwt.return_unit
     else Log.warn (fun m -> m "Dispatcher: dropped pkt %a -> %a" Ipaddr.V4.pp_hum src_ip Ipaddr.V4.pp_hum dst_ip)
 
 
@@ -329,39 +332,42 @@ module Dispatcher = struct
     let rec drain_pkt () =
       Lwt_stream.get in_s >>= function
       | Some (buf, pkt) ->
-          dispatch t po endp (buf, pkt)
-          >>= drain_pkt
+          dispatch t po endp (buf, pkt) >>= fun () ->
+          drain_pkt ()
       | None ->
           Log.warn (fun m -> m "endpoint %s closed?!" @@ Proto.endp_to_string endp)
     in
-    (*need a handle here*)
-    Lwt.async drain_pkt
+    Lwt.return drain_pkt
 
 
   (*from local stack in Server*)
   let set_local_listener t =
     let open Frame in
     let listener buf =
+      Lwt.catch (fun () ->
+          (*hexdump_buf_debug "local listener" buf >>= fun () ->*)
       match parse buf with
       | Ok (Ethernet {dst = dst_mac; payload = (Ipv4 {dst = dst_ip} as pkt)})
         when 0 = Macaddr.compare dst_mac dispatcher_mac ->
           let push_endp = find_push_endpoint t dst_ip in
+          Log.debug (fun m -> m "found endpoint to push: %s" @@ Proto.endp_to_string push_endp) >>= fun () ->
           let _, push_fn = EndpMap.find push_endp t.endpoints in
           let pkt_raw = Cstruct.shift buf Ethif_wire.sizeof_ethernet in
           push_fn @@ Some (pkt_raw, pkt);
           Lwt.return_unit
-      | Ok (Ethernet {src = tha; payload = Arp {op = `Request}}) ->
+      | Ok (Ethernet {src = tha; payload = Arp {op = `Request; spa = tpa; tpa = spa}}) ->
           let arp_resp =
             let open Arpv4_packet in
-            let tpa = Local.Service.ip t.local.service in
-            let t = {op = Arpv4_wire.Reply; sha = dispatcher_mac; spa = Ipaddr.V4.any; tha; tpa} in
+            let t = {op = Arpv4_wire.Reply; sha = dispatcher_mac; spa; tha; tpa} in
             Marshal.make_cstruct t
           in
           Local.write_to_service t.local dispatcher_mac Ethif_wire.ARP arp_resp
       | Ok fr ->
           Log.warn (fun m -> m "not ipv4 or arp request: %s, dropped" (fr_info fr))
       | Error (`Msg msg) ->
-          Log.err (fun m -> m "parse pkt from local err: %s" msg)
+          Log.err (fun m -> m "parse pkt from local err: %s" msg))
+        (fun e -> Log.err (fun m -> m "set_local_listener: %s\n%s" (Printexc.to_string e) (Printexc.get_backtrace ()))
+        >>= fun () -> Lwt.fail e)
     in
     Local.Backend.set_listen_fn t.local.backend t.local.id listener
 
@@ -374,9 +380,10 @@ end
 
 let rec from_endpoint conn push_in =
   Proto.Server.recv conn >>= fun buf ->
-  (*hexdump_buf_debug buf >>= fun () ->*)
+  (*hexdump_buf_debug "from_endpoint" buf >>= fun () ->*)
   Frame.parse_ipv4_pkt buf |> function
   | Ok fr ->
+      Log.info (fun m -> m "parse_ipv4_pkt: %s" (Frame.fr_info fr)) >>= fun () ->
       push_in @@ Some (buf, fr);
       from_endpoint conn push_in
   | Error (`Msg msg) ->
@@ -387,10 +394,21 @@ let rec from_endpoint conn push_in =
 let rec to_endpoint conn out_s =
   Lwt_stream.get out_s >>= function
   | Some (buf, _) ->
+      (*hexdump_buf_debug "to_endpoint" buf >>= fun () ->*)
       Proto.Server.send conn buf >>= fun () ->
       to_endpoint conn out_s
   | None ->
       Log.warn (fun m -> m "output stream closed ?!")
+
+
+let async_exception () =
+  let hook = !Lwt.async_exception_hook in
+  let hook' = fun exn ->
+    Log.err (fun m -> m "aysnc exception: %s\n%s" (Printexc.to_string exn) (Printexc.get_backtrace ()))
+    |> Lwt.ignore_result;
+    hook exn
+  in
+  Lwt.async_exception_hook := hook'
 
 
 let main path cm_intf =
@@ -402,8 +420,9 @@ let main path cm_intf =
     let in_s, push_in = Lwt_stream.create () in
     let out_s, push_out = Lwt_stream.create () in
     Log.info (fun m -> m "client %s made connection!" @@ Proto.endp_to_string endp) >>= fun () ->
-    Dispatcher.register_endpoint disp policy endp in_s push_out;
+    Dispatcher.register_endpoint disp policy endp in_s push_out >>= fun drain_pkt ->
     Lwt.pick [
+      drain_pkt ();
       from_endpoint conn push_in;
       to_endpoint conn out_s
     ]
