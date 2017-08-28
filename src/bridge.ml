@@ -411,9 +411,13 @@ let async_exception () =
   Lwt.async_exception_hook := hook'
 
 
-let main path cm_intf =
+let main intf path v =
+  Logs.set_reporter @@ Logs_fmt.reporter ();
+  Logs.set_level @@ if v then Some Debug else Some Info;
+  let intf = Ipaddr.V4.of_string_exn intf in
+
   Proto.Server.bind path >>= fun server ->
-  Local.create cm_intf >>= fun local ->
+  Local.create intf >>= fun local ->
   let disp = Dispatcher.create local in
   let policy = Policy.create () in
   let serve_endp endp conn =
@@ -433,15 +437,26 @@ let main path cm_intf =
   Local.start_service local policy ()
 
 
-let () =
-  let path = Sys.argv.(1) in
-  let lvl = Sys.argv.(2) in
-  let cm_intf = Sys.argv.(3) |> Ipaddr.V4.of_string_exn in
-  Lwt_main.run (
-    Logs.set_reporter @@ Logs_fmt.reporter ();
-    Logs.set_level (match String.lowercase_ascii lvl with
-      | "debug" -> Some Logs.Debug
-      | _ -> Some Logs.Info);
+open Cmdliner
 
-    Log.info (fun m -> m "listen on unix socket %s" path) >>= fun () ->
-    main path cm_intf)
+let usocket =
+  let doc = "unix socket for the bridge to listen to" in
+  Arg.(value & opt string "/var/tmp/bridge" & info ["s"; "socket"] ~doc ~docv:"SOCKET")
+
+let sys_intf =
+  let doc = "interface on the system network" in
+  Arg.(required & pos 0 (some string) None & info [] ~doc ~docv:"INTF")
+
+let verbose =
+  let doc = "verbose logging" in
+  Arg.(value & flag & info ["v"] ~doc)
+
+let cmd =
+  let doc = "databox-bridge core component" in
+  Term.(const main $ sys_intf $ usocket $ verbose),
+  Term.info "bridge" ~doc ~man:[]
+
+let () =
+  match Term.eval cmd with
+  | `Ok t -> Lwt_main.run t
+  | _ -> exit 1

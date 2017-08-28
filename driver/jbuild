@@ -1,0 +1,7 @@
+(jbuild_version 1)
+
+(executable
+  ((name driver)
+  (libraries
+    (lwt.unix lwt re bos fpath logs.lwt logs.fmt cmdliner))
+  (preprocess no_preprocessing)))

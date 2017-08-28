@@ -5,12 +5,12 @@ let bridge_socket =
   Key.(create "socket_path" Arg.(opt string "/var/tmp/bridge" doc))
 
 
-let net = netif "eth1"
+let net = netif "%%DEVICE%%"
 let ethif = etif net
 let arp = arp ethif
 let ip =
   let config = {
-    network = Ipaddr.V4.Prefix.of_address_string_exn "172.18.0.2/16";
+    network = Ipaddr.V4.Prefix.of_address_string_exn "%%ADDRESS%%";
     gateway = None
   } in
   create_ipv4 ~config ethif arp
