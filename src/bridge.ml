@@ -411,7 +411,7 @@ let async_exception () =
   Lwt.async_exception_hook := hook'
 
 
-let main intf path v =
+let main path v =
   Logs.set_reporter @@ Logs_fmt.reporter ();
   Logs.set_level @@ if v then Some Debug else Some Info;
 
@@ -442,17 +442,13 @@ let usocket =
   let doc = "unix socket for the bridge to listen to" in
   Arg.(value & opt string "/var/tmp/bridge" & info ["s"; "socket"] ~doc ~docv:"SOCKET")
 
-let sys_intf =
-  let doc = "interface on the system network" in
-  Arg.(required & pos 0 (some string) None & info [] ~doc ~docv:"INTF")
-
 let verbose =
   let doc = "verbose logging" in
   Arg.(value & flag & info ["v"] ~doc)
 
 let cmd =
   let doc = "databox-bridge core component" in
-  Term.(const main $ sys_intf $ usocket $ verbose),
+  Term.(const main $ usocket $ verbose),
   Term.info "bridge" ~doc ~man:[]
 
 let () =

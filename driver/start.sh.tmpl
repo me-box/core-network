@@ -6,4 +6,4 @@ cd %%PATH%%
 eval `opam config env`
 mirage configure -t unix
 make
-sudo ./connector &
+sudo ./connector --dev %%DEVICE%% --intf %%ADDRESS%% &

@@ -4,6 +4,14 @@ let bridge_socket =
   let doc = Key.Arg.info ~doc:"bridge socket to connect to" ["path"] in
   Key.(create "socket_path" Arg.(opt string "/var/tmp/bridge" doc))
 
+let device =
+  let doc = Key.Arg.info ~doc:"interface to connect to the bridge" ["dev"] in
+  Key.(create "device" Arg.(opt string "ethx" doc))
+
+let ip_address =
+  let doc = Key.Arg.info ~doc:"ip address of on the provide interface" ["intf"] in
+  Key.(create "ip" Arg.(opt string "xxx.xxx.xxx.xxx" doc))
+
 
 let net = netif "%%DEVICE%%"
 let ethif = etif net
@@ -20,8 +28,8 @@ let main = foreign "Connector.Make" (network @-> ethernet @-> arpv4 @-> ipv4 @->
 
 
 let () =
-  let keys = [
-    Key.abstract bridge_socket
+  let keys = List.map Key.abstract [
+    bridge_socket; device; ip_address
   ] in
   let packages = [
     package ~sublibs:["lwt"] "logs";

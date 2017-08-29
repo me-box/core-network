@@ -3,5 +3,5 @@
 (executable
   ((name driver)
   (libraries
-    (lwt.unix lwt re bos fpath logs.lwt logs.fmt cmdliner))
+    (lwt.unix lwt re re.posix bos fpath logs.lwt logs.fmt cmdliner))
   (preprocess no_preprocessing)))
