@@ -8,7 +8,6 @@ module Make (B: Vnetif.BACKEND) : sig
   type t
 
   val mac: t -> Macaddr.t
-  val ip: t -> Ipaddr.V4.t
 
   val default_not_found: callback
   val callback_of_routes: (Cohttp.Code.meth * Opium_kernel.Route.t * Opium_kernel.Rock.Handler.t) list -> callback
@@ -25,7 +24,7 @@ module Make (B: Vnetif.BACKEND) : sig
   val respond : ?headers:Cohttp.Header.t -> ?code:Cohttp.Code.status_code -> body -> Response.t
   val respond' : ?headers:Cohttp.Header.t -> ?code:Cohttp.Code.status_code -> body -> Response.t Lwt.t
 
-  val make: B.t -> Ipaddr.V4.t -> t Lwt.t
+  val make: B.t -> t Lwt.t
   val start: t -> ?port:int -> ?callback:callback -> unit -> unit Lwt.t
 end
 

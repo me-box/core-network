@@ -180,7 +180,7 @@ module Local = struct
     service: Service.t;
   }
 
-  let create service_ip =
+  let create () =
     let yield = Lwt_main.yield in
     let use_async_readers = true in
     let backend = Backend.create ~yield ~use_async_readers () in
@@ -191,15 +191,8 @@ module Local = struct
           Log.err (fun m -> m "Backend.register err: %a" Mirage_net.pp_error err)
           |> Lwt.ignore_result; -1
     in
-    Service.make backend service_ip >>= fun service ->
+    Service.make backend >>= fun service ->
     Lwt.return {id; backend; service}
-
-  let is_to_service {service} pkt =
-    let open Frame in
-    let service_ip = Service.ip service in
-    match pkt with
-    | Ipv4 { dst; payload = Tcp _} when 0 = Ipaddr.V4.compare dst service_ip -> true
-    |_ -> false
 
 
   let write_to_service t source ethertype pkt =
@@ -215,8 +208,9 @@ module Local = struct
         >>= Lwt.return
 
 
-  let start_service t po =
-    let open Service in
+  open Service
+
+  let allow_route po =
     let allow_handler = fun req ->
       json_of_body_exn req >>= fun obj ->
       Ezjsonm.(get_pair get_string get_string @@ value obj)
@@ -231,8 +225,9 @@ module Local = struct
            Lwt.return (status, `String msg)) >>= fun (code, body) ->
       respond' ~code body
     in
-    let allow_route = post "/connect" allow_handler in
+    post "/connect" allow_handler
 
+  let forbidden_route po =
     let forbidden_handler = fun req ->
       json_of_body_exn req >>= fun obj ->
       Ezjsonm.(get_pair get_string get_string @@ value obj)
@@ -247,9 +242,11 @@ module Local = struct
            Lwt.return (status, `String msg)) >>= fun (code, body) ->
       respond' ~code body
     in
-    let forbidden_route = post "/disconnect" forbidden_handler in
+    post "/disconnect" forbidden_handler
 
-    let callback = callback_of_routes [allow_route; forbidden_route] in
+
+  let start_service t po =
+    let callback = callback_of_routes [allow_route po; forbidden_route po] in
     start t.service ~callback
 end
 
@@ -266,6 +263,7 @@ module Dispatcher = struct
     mutable endpoints: (st_elem Lwt_stream.t * (st_elem option -> unit)) EndpMap.t;
     route_cache: (Ipaddr.V4.t, Proto.endpoint) Hashtbl.t;
     local: Local.t;
+    policy: Policy.t;
   }
 
   let dispatcher_mac = Macaddr.make_local (fun x -> x + 1)
@@ -298,8 +296,10 @@ module Dispatcher = struct
       push_endpoint
     end
 
+  let is_to_local {endpoints} dst_ip =
+    EndpMap.exists (fun endp _ -> 0 = Ipaddr.V4.compare dst_ip endp.Proto.ip_addr) endpoints
 
-  let dispatch t po endp (buf, pkt) =
+  let dispatch t endp (buf, pkt) =
     Log.info (fun m -> m "in dispatch %s(%d)" (Frame.fr_info pkt) (Cstruct.len buf)) >>= fun () ->
     let src_ip, dst_ip = let open Frame in match pkt with
       | Ipv4 {src; dst; _} -> src, dst
@@ -308,16 +308,16 @@ module Dispatcher = struct
           assert false in
     if Dns_service.is_dns_query pkt then
       Log.info (fun m -> m "Dispatcher: a dns query from %a" Ipaddr.V4.pp_hum src_ip) >>= fun () ->
-      let predicate = Policy.is_authorized_resolve po src_ip in
+      let predicate = Policy.is_authorized_resolve t.policy src_ip in
       Dns_service.process_dns_query ~predicate pkt >>= fun resp ->
       let resp_buf, resp_pkt = Dns_service.to_dns_response t pkt resp in
       let _, push_fn = EndpMap.find endp t.endpoints in
       push_fn @@ Some (resp_buf, resp_pkt);
       Lwt.return_unit
-    else if Local.is_to_service t.local pkt then
+    else if is_to_local t dst_ip then
       Log.debug (fun m -> m "Dispatcher: allowed pkt[local] %a -> %a" Ipaddr.V4.pp_hum src_ip Ipaddr.V4.pp_hum dst_ip) >>= fun () ->
       Local.write_to_service t.local dispatcher_mac Ethif_wire.IPv4 buf
-    else if Policy.is_authorized_transport po src_ip dst_ip then
+    else if Policy.is_authorized_transport t.policy src_ip dst_ip then
       Log.debug (fun m -> m "Dispatcher: allowed pkt %a -> %a" Ipaddr.V4.pp_hum src_ip Ipaddr.V4.pp_hum dst_ip) >>= fun () ->
       let push_endp = find_push_endpoint t dst_ip in
       let _, push_fn = EndpMap.find push_endp t.endpoints in
@@ -326,13 +326,13 @@ module Dispatcher = struct
     else Log.warn (fun m -> m "Dispatcher: dropped pkt %a -> %a" Ipaddr.V4.pp_hum src_ip Ipaddr.V4.pp_hum dst_ip)
 
 
-  let register_endpoint t po endp in_s push_out =
+  let register_endpoint t endp in_s push_out =
     if not @@ EndpMap.mem endp t.endpoints then
       t.endpoints <- EndpMap.add endp (in_s, push_out) t.endpoints;
     let rec drain_pkt () =
       Lwt_stream.get in_s >>= function
       | Some (buf, pkt) ->
-          dispatch t po endp (buf, pkt) >>= fun () ->
+          dispatch t endp (buf, pkt) >>= fun () ->
           drain_pkt ()
       | None ->
           Log.warn (fun m -> m "endpoint %s closed?!" @@ Proto.endp_to_string endp)
@@ -371,10 +371,10 @@ module Dispatcher = struct
     in
     Local.Backend.set_listen_fn t.local.backend t.local.id listener
 
-  let create local  =
+  let create local policy  =
     let endpoints = EndpMap.empty  in
     let route_cache = Hashtbl.create 7 in
-    {endpoints; route_cache; local}
+    {endpoints; route_cache; local; policy}
 end
 
 
@@ -414,17 +414,16 @@ let async_exception () =
 let main intf path v =
   Logs.set_reporter @@ Logs_fmt.reporter ();
   Logs.set_level @@ if v then Some Debug else Some Info;
-  let intf = Ipaddr.V4.of_string_exn intf in
 
   Proto.Server.bind path >>= fun server ->
-  Local.create intf >>= fun local ->
-  let disp = Dispatcher.create local in
+  Local.create () >>= fun local ->
   let policy = Policy.create () in
+  let disp = Dispatcher.create local policy in
   let serve_endp endp conn =
     let in_s, push_in = Lwt_stream.create () in
     let out_s, push_out = Lwt_stream.create () in
     Log.info (fun m -> m "client %s made connection!" @@ Proto.endp_to_string endp) >>= fun () ->
-    Dispatcher.register_endpoint disp policy endp in_s push_out >>= fun drain_pkt ->
+    Dispatcher.register_endpoint disp endp in_s push_out >>= fun drain_pkt ->
     Lwt.pick [
       drain_pkt ();
       from_endpoint conn push_in;

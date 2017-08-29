@@ -24,12 +24,8 @@ module Make(Backend: Vnetif.BACKEND) = struct
 
   type t = {
     net: Vnet.t;
-    ip: Ipaddr.V4.t;
     start_fn: Conduit_mirage.server -> Http.t -> unit Lwt.t;
   }
-
-  let mac {net} = Vnet.mac net
-  let ip {ip} = ip
 
   let or_fail name m =
     Lwt.catch (fun () -> m) (fun e ->
@@ -40,23 +36,8 @@ module Make(Backend: Vnetif.BACKEND) = struct
     let uri = Cohttp.Request.uri req in
     Http.respond_not_found ~uri ()
 
-  let callback_of_routes routes =
-    let open Opium_kernel in
-    let open Rock in
-    let router = Router.create () in
-    List.iter (fun (meth, route, action) -> Router.add ~meth ~route ~action router) routes;
-    let m = Router.m router in
-    let init = Handler.not_found in
-    let handler = Filter.apply_all [Middleware.filter m] init in
-    fun (_: Http.conn) req body ->
-      let req = Request.create ~body req in
-      Lwt.catch (fun () -> handler req) (fun e ->
-          Log.err (fun m -> m "handler err: %s" (Printexc.to_string e));
-          let body = Printexc.to_string e in
-          let resp = Response.of_string_body ~code:Cohttp.Code.(`Code 500) body in
-          Lwt.return resp)
-      >>= fun {Response.code; headers; body} ->
-      Http.respond ~headers ~body ~status:code ()
+
+  let mac {net} = Vnet.mac net
 
   let get route action = `GET, Opium_kernel.Route.of_string  route, action
   let post route action = `POST, Opium_kernel.Route.of_string route, action
@@ -90,11 +71,52 @@ module Make(Backend: Vnetif.BACKEND) = struct
     req |> Request.body |> Cohttp_lwt_body.to_string >|= Ezjsonm.from_string
 
 
-  let make b ip =
+  let auth_middleware =
+    let name = "check auth for CM" in
+    let filter = fun handler req ->
+      let headers = Request.headers req in
+      let open Rresult.R in
+      ((match Cohttp.Header.get headers "x-api-key" with
+         | Some m -> ok m
+         | None -> begin
+             match Cohttp.Header.get_authorization headers with
+             | Some (`Basic (name, _)) -> ok name
+             | _ -> error_msg "Missing API key/token" end)
+       >>= fun key  -> Br_env.cm_key ()
+       >>= fun key' -> if key = key' then ok () else error_msg "Unauthorized: CM key invalid")
+      |> function
+      | Ok () -> handler req
+      | Error (`Msg msg) -> respond' ~code:(`Code 401) (`String msg)
+    in
+    Opium_kernel.Rock.Middleware.create ~name ~filter
+
+
+  let callback_of_routes routes =
+    let open Opium_kernel in
+    let open Rock in
+    let router = Router.create () in
+    List.iter (fun (meth, route, action) -> Router.add ~meth ~route ~action router) routes;
+    let m = Router.m router in
+    let init = Handler.not_found in
+    let filters = List.map Middleware.filter [m; auth_middleware] in
+    let handler = Filter.apply_all filters init in
+    fun (_: Http.conn) req body ->
+      let req = Request.create ~body req in
+      Lwt.catch (fun () -> handler req) (fun e ->
+          Log.err (fun m -> m "handler err: %s" (Printexc.to_string e));
+          let body = Printexc.to_string e in
+          let resp = Response.of_string_body ~code:Cohttp.Code.(`Code 500) body in
+          Lwt.return resp)
+      >>= fun {Response.code; headers; body} ->
+      Http.respond ~headers ~body ~status:code ()
+
+
+  let make b =
     or_fail "Vnetif.connect" @@ Vnet.connect b >>= fun net ->
     or_fail "E.connect" @@ E.connect net >>= fun ethif ->
     Mclock.connect () >>= fun clock ->
     or_fail "A.connect" @@ A.connect ethif clock >>= fun arp ->
+    let ip = Ipaddr.V4.unspecified in
     or_fail "I.connect" @@ I.connect ~ip ethif arp >>= fun i ->
     Lwt.return @@ Stdlibrandom.initialize () >>= fun () ->
     or_fail "Icmp.connect" @@ Icmp.connect i >>= fun icmp ->
@@ -105,7 +127,7 @@ module Make(Backend: Vnetif.BACKEND) = struct
     Nocrypto_entropy_lwt.initialize () >>= fun () ->
     or_fail "C.connect" @@ C.connect tcpip Conduit_mirage.empty >>= fun c ->
     or_fail "Http.connect" @@ Http.connect c >>= fun start_fn ->
-    Lwt.return {net; ip; start_fn}
+    Lwt.return {net;start_fn}
 
   let start {start_fn} ?(port=8080) ?(callback=default_not_found)() =
     let mode = `TCP port in
