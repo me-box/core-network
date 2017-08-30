@@ -4,9 +4,6 @@ open Lwt.Infix
 let driver = Logs.Src.create "driver" ~doc:"Connector driver"
 module Log = (val Logs_lwt.src_log driver : Logs_lwt.LOG)
 
-
-let command = "ip", [|"ip"; "monitor"; "address"|]
-
 let intf_event l =
   let open Re in
   let up = "(eth[0-9]+).* (([0-9]+.){3}[0-9]+/[0-9]+) .* eth[0-9]+" in
@@ -26,53 +23,6 @@ let intf_event l =
   with Not_found -> None
 
 
-let if_up l =
-  let open Re in
-  let dev = seq [bow; str "eth"; rep1 digit; eow] in
-  let addr = seq [bow; rep1 digit; repn (seq [char '.'; rep1 digit]) 3 (Some 3); char '/'; rep1 digit; eow] in
-  let t = seq [group dev; rep notnl; group addr; rep notnl; dev] in
-  let re = compile t in
-  let groups = all re l in
-
-  if 0 = List.length groups then None
-  else begin
-    assert (1 = List.length groups);
-    let group = List.hd groups in
-    let arr = Group.all_offset group in
-    let dev =
-      let dev_s, dev_e = Array.get arr 1 in
-      String.sub l dev_s (dev_e - dev_s )
-    in
-    let addr =
-      let addr_s, addr_e = Array.get arr 2 in
-      String.sub l addr_s (addr_e - addr_s)
-    in
-    Some (dev, addr)
-  end
-
-(* Deleted 142: if142    inet 172.22.0.2/16 scope global veth93848f5
-       valid_lft forever preferred_lft forever*)
-let if_down l =
-  let open Re in
-  let op = str "Deleted" in
-  let addr = seq [bow; rep1 digit; repn (seq [char '.'; rep1 digit]) 3 (Some 3); char '/'; rep1 digit; eow] in
-  let t = seq [group op; rep notnl; group addr] in
-  let re = compile t in
-  let groups = all re l in
-
-  if 0 = List.length groups then None
-  else begin
-    assert (1 = List.length groups);
-    let group = List.hd groups in
-    let arr = Group.all_offset group in
-    let addr =
-      let addr_s, addr_e = Array.get arr 2 in
-      String.sub l addr_s (addr_e - addr_s)
-    in
-    Some addr
-  end
-
-
 let fill_config_tmpl config dev addr =
   let open Bos.OS in
   let open Rresult in
@@ -86,9 +36,9 @@ let dir_of_dev dev = "connector_" ^ dev
 
 let create_connector dev addr =
   let open Bos.OS in
-  let open Rresult in
   let open Fpath in
-  (Dir.user ()
+  (let open Rresult in
+    Dir.user ()
    >>= fun user_path ->
    let config_tmpl = user_path / "core-bridge" / "driver" / "config.ml.tmpl" in
    fill_config_tmpl config_tmpl dev addr
@@ -103,8 +53,8 @@ let create_connector dev addr =
        | Ok () -> Lwt.return_unit
        | Error msg -> Log.err (fun m -> m "write config.ml: %a" R.pp_msg msg)))
   |> function
-  | Ok t -> t
-  | Error msg -> Log.err (fun m -> m "create_connector: %a" R.pp_msg msg)
+  | Ok t -> Log.debug (fun m -> m "connector for %s %s created!" dev addr) >>= fun () -> t
+  | Error msg -> Log.err (fun m -> m "create_connector: %a" Rresult.R.pp_msg msg)
 
 
 let fill_start_tmpl start path dev addr =
@@ -121,6 +71,8 @@ let start_connector dev addr =
   let open Bos.OS in
   let open Fpath in
   let open Lwt_result.Infix in
+  Lwt_result.ok @@ Log.debug (fun m -> m "starting connector for %s %s..." dev addr)
+  >>= fun () ->
   Lwt.return @@ Dir.user ()
   >>= fun user_path ->
   let connector = user_path / (dir_of_dev dev) in
@@ -141,39 +93,65 @@ let remove_connector dev =
   (Dir.user () >>= fun user_path ->
    let connector = user_path / (dir_of_dev dev) in
    Dir.delete ~recurse:true connector)
-  |> fun _ -> Lwt.return_unit
+  |> fun _ -> Log.debug (fun m -> m "housekeeping for %s finished!" dev)
+
+
+let existed_intf t =
+  let command = "ip", [|"ip"; "address"; "show"|] in
+  let st = Lwt_process.pread_lines command in
+  Lwt_stream.to_list st >>= fun lines ->
+  let regex = "inet (([0-9]+.){3}[0-9]+/[0-9]+) .*(eth[0-9]+)$" in
+  let re = Re_posix.(regex |> re |> compile) in
+  List.fold_left (fun acc line ->
+      try let groups = Re.exec re line |> Re.Group.all in
+        let dev = groups.(3) and addr = groups.(1) in
+        (dev, addr) :: acc
+      with Not_found -> acc) [] lines
+  |> fun existed ->
+  Log.info (fun m -> m "found %d existed phy interfaces" (List.length existed)) >>= fun () ->
+  Lwt_list.iter_p (fun (dev, addr) ->
+      create_connector dev addr >>= fun () ->
+      start_connector dev addr >>= (function
+        | Ok (Unix.WEXITED 0) -> Lwt.return @@ Hashtbl.add t addr dev
+        | _ -> remove_connector dev)) existed
 
 
 let  monitor v () =
   Logs.set_reporter (Logs_fmt.reporter ());
   Logs.(set_level @@ if v then Some Debug else Some Info);
 
- (* (ip, interface name) Hashtbl.t *)
+  (* (ip, interface name) Hashtbl.t *)
   let connectors = Hashtbl.create 7 in
+
+  let command = "ip", [|"ip"; "monitor"; "address"|] in
   let stm = Lwt_process.pread_lines command in
-  let rec aux () =
+  let rec m () =
     Lwt_stream.get stm >>= function
     | None ->
         Lwt_io.printf "closed!"
     | Some l ->
         match intf_event l with
-        | None -> aux ()
+        | None ->  m ()
         | Some (`Up (dev, addr)) ->
-            Hashtbl.add connectors addr dev;
             Log.debug (fun m -> m "link up: %s" l) >>= fun () ->
             Log.info (fun m -> m "link up: %s %s" dev addr) >>= fun () ->
             create_connector dev addr >>= fun () ->
             start_connector dev addr >>= (function
-            | Ok (Unix.WEXITED 0) -> aux ()
-            | _ -> remove_connector dev >>= aux)
+              | Ok (Unix.WEXITED 0) ->
+                  Hashtbl.add connectors addr dev;
+                  m ()
+              | _ -> remove_connector dev >>= m)
         | Some (`Down addr) ->
             let dev = Hashtbl.find connectors addr in
             Log.debug (fun m -> m "link down: %s" l) >>= fun () ->
             Log.info (fun m -> m "link down: %s %s" dev addr) >>= fun () ->
             remove_connector dev >>= fun () ->
-            aux ()
+            m ()
   in
-  aux ()
+
+  existed_intf connectors >>= fun () ->
+  Log.info (fun m -> m "start monitoring for phy intf event...") >>= fun () ->
+  m ()
 
 
 open Cmdliner

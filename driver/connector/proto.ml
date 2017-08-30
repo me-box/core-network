@@ -94,7 +94,7 @@ module Client = struct
     Lwt.catch (fun () ->
         Lwt_io.close ic >>= fun () ->
         Lwt_io.close oc) (function
-      | Unix.Unix_error (EBADF,_,_) -> Lwt.return_unit
+      | Unix.Unix_error (Unix.EBADF,_,_) -> Lwt.return_unit
       | e -> Lwt.fail e)
 end
 
@@ -105,7 +105,7 @@ module Server = struct
     Lwt.catch (fun () ->
         Lwt_unix.unlink path)
       (function
-      | Unix.Unix_error(Unix.ENOENT, _, _) -> Lwt.return ()
+      | Unix.Unix_error (Unix.ENOENT, _, _) -> Lwt.return ()
       | e -> Lwt.fail e)
     >>= fun () ->
 
