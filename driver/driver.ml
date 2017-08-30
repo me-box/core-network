@@ -131,7 +131,7 @@ let start_connector dev addr =
   Lwt.return @@ File.write target_start start
   >>= fun () ->
   let sh = "sh", [|"sh"; Fpath.to_string target_start|] in
-  Lwt_result.return @@ Lwt_process.exec sh
+  Lwt_result.ok @@ Lwt_process.exec sh
 
 
 let remove_connector dev =
@@ -141,7 +141,7 @@ let remove_connector dev =
   (Dir.user () >>= fun user_path ->
    let connector = user_path / (dir_of_dev dev) in
    Dir.delete ~recurse:true connector)
-  |> Lwt.return
+  |> fun _ -> Lwt.return_unit
 
 
 let  monitor v () =
@@ -163,13 +163,14 @@ let  monitor v () =
             Log.debug (fun m -> m "link up: %s" l) >>= fun () ->
             Log.info (fun m -> m "link up: %s %s" dev addr) >>= fun () ->
             create_connector dev addr >>= fun () ->
-            start_connector dev addr >>= fun _ ->
-            aux ()
+            start_connector dev addr >>= (function
+            | Ok (Unix.WEXITED 0) -> aux ()
+            | _ -> remove_connector dev >>= aux)
         | Some (`Down addr) ->
             let dev = Hashtbl.find connectors addr in
             Log.debug (fun m -> m "link down: %s" l) >>= fun () ->
             Log.info (fun m -> m "link down: %s %s" dev addr) >>= fun () ->
-            remove_connector dev >>= fun _ ->
+            remove_connector dev >>= fun () ->
             aux ()
   in
   aux ()

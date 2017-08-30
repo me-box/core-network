@@ -91,8 +91,11 @@ module Client = struct
   let recv (ic, _) = recv_pkt ic
 
   let disconnect (ic, oc) =
-    Lwt_io.close ic >>= fun () ->
-    Lwt_io.close oc
+    Lwt.catch (fun () ->
+        Lwt_io.close ic >>= fun () ->
+        Lwt_io.close oc) (function
+      | Unix.Unix_error (EBADF,_,_) -> Lwt.return_unit
+      | e -> Lwt.fail e)
 end
 
 
@@ -118,6 +121,7 @@ module Server = struct
     let rec loop_accept fd =
       Lwt_unix.accept fd >>= fun (client_fd, _) ->
       Lwt.async (fun () ->
+          let endp_ptr = ref None in
           Lwt.catch (fun () ->
               Lwt.finalize (fun () ->
                   let ic = Lwt_io.(of_fd ~mode:input client_fd) in
@@ -126,10 +130,14 @@ module Server = struct
                   let endp_buf = Bytes.create sizeof_endp in
                   Lwt_io.read_into_exactly ic endp_buf 0 sizeof_endp >>= fun () ->
                   let endp, _ = unmarshal_endp @@ Cstruct.of_bytes endp_buf in
-
+                  let () = endp_ptr := Some endp in
                   cb endp (ic, oc)) (fun () -> Lwt_unix.close client_fd))
-            (fun e ->
-               Log.err (fun m -> m "Proto.Server.listen accept err: %s" @@ Printexc.to_string e)));
+            (function
+            | End_of_file ->
+                let endp_info = match !endp_ptr with None -> "" | Some e -> endp_to_string e in
+                Log.info (fun m -> m "client %s closes connection!" endp_info)
+            | e ->
+                Log.err (fun m -> m "Proto.Server.listen accept err: %s" @@ Printexc.to_string e)));
       loop_accept fd
     in
 
