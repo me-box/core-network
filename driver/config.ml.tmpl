@@ -10,7 +10,7 @@ let device =
 
 let ip_address =
   let doc = Key.Arg.info ~doc:"ip address of on the provide interface" ["intf"] in
-  Key.(create "ip" Arg.(opt string "xxx.xxx.xxx.xxx" doc))
+  Key.(create "ip_address" Arg.(opt string "xxx.xxx.xxx.xxx/xx" doc))
 
 
 let net = netif "%%DEVICE%%"

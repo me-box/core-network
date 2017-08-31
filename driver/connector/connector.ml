@@ -59,8 +59,11 @@ module Make(N: NETWORK)(E: ETHIF)(Arp: ARP)(Ip: IPV4) = struct
     let socket_path = Key_gen.socket_path () in
     let intf = Key_gen.interface () in
     let macaddr = E.mac eth in
-    let ipaddr = Ip.get_ip ip |> List.hd in
-    let endp = Proto.create_endp intf macaddr ipaddr in
+    let ip_addr, netmask =
+      let addr = Key_gen.ip_address () in
+      let prefix, ip = Ipaddr.V4.Prefix.of_address_string_exn addr in
+      ip, Ipaddr.V4.Prefix.bits prefix in
+    let endp = Proto.create_endp intf macaddr ip_addr netmask in
 
     Proto.Client.connect socket_path endp >>= function
     | Ok conn ->

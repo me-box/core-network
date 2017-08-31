@@ -11,13 +11,14 @@ type endpoint = {
   interface: string;
   mac_addr : Macaddr.t;
   ip_addr  : Ipaddr.V4.t;
+  netmask  : int;
 }
 
 
-let sizeof_endp = 8 + 6 + 4
+let sizeof_endp = 8 + 6 + 4 + 1
 
 
-let marshal_endp {interface; mac_addr; ip_addr} buf =
+let marshal_endp {interface; mac_addr; ip_addr; netmask} buf =
   let intf =
     let tmp = Bytes.make 8 '\000' in
     let len = String.length interface in
@@ -27,6 +28,7 @@ let marshal_endp {interface; mac_addr; ip_addr} buf =
   Cstruct.blit_from_bytes intf 0 buf 0 8;
   Cstruct.blit_from_bytes (Bytes.of_string @@ Macaddr.to_bytes mac_addr) 0 buf 8 6;
   Cstruct.blit_from_bytes (Bytes.of_string @@ Ipaddr.V4.to_bytes ip_addr) 0 buf (8 + 6) 4;
+  Cstruct.set_char buf (8 + 6 + 4) (char_of_int netmask);
   Cstruct.shift buf sizeof_endp
 
 
@@ -38,12 +40,13 @@ let unmarshal_endp buf =
   in
   let mac_addr = Macaddr.of_bytes_exn @@ Cstruct.(to_string @@ sub buf 8 6) in
   let ip_addr = Ipaddr.V4.of_bytes_exn @@ Cstruct.(to_string @@ sub buf (8 + 6) 4) in
-  {interface; mac_addr; ip_addr}, Cstruct.shift buf sizeof_endp
+  let netmask = int_of_char @@ Cstruct.get_char buf (8 + 6 + 4) in
+  {interface; mac_addr; ip_addr; netmask}, Cstruct.shift buf sizeof_endp
 
-let endp_to_string {interface; mac_addr; ip_addr} =
-  Printf.sprintf "endp %s %s %s" interface (Macaddr.to_string mac_addr) (Ipaddr.V4.to_string ip_addr)
+let endp_to_string {interface; mac_addr; ip_addr; netmask} =
+  Printf.sprintf "endp %s %s %s/%d" interface (Macaddr.to_string mac_addr) (Ipaddr.V4.to_string ip_addr) netmask
 
-let create_endp interface mac_addr ip_addr = {interface; mac_addr; ip_addr}
+let create_endp interface mac_addr ip_addr netmask = {interface; mac_addr; ip_addr; netmask}
 
 
 let sizeof_pkt = 2

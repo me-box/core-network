@@ -268,34 +268,28 @@ module Dispatcher = struct
 
   let dispatcher_mac = Macaddr.make_local (fun x -> x + 1)
 
-  let better_endpoint ip endpx endpy =
-    let matched_prefix ipx ipy =
-      let mask = Int32.shift_left 1l 31 in
-      let ipx = Int32.logor (Ipaddr.V4.to_int32 ipx) mask in
-      let ipy = Int32.logor (Ipaddr.V4.to_int32 ipy) mask in
-      Int32.logxor ipx ipy
-    in
-    (*smaller is better, ASSUMING highest bit(s) are all the same*)
-    if Int32.compare
-        (matched_prefix ip endpx.Proto.ip_addr)
-        (matched_prefix ip endpy.Proto.ip_addr) < 0
-    then endpx
-    else endpy
-
   let find_push_endpoint {endpoints; route_cache} ip =
-    if Hashtbl.mem route_cache ip then Hashtbl.find route_cache ip
+    if Hashtbl.mem route_cache ip then
+      let endp = Hashtbl.find route_cache ip in
+      if EndpMap.mem endp endpoints then Ok endp
+      else Error "interface down"
     else begin
-      let local_endp = Proto.{
-          interface = "local";
-          mac_addr = Macaddr.broadcast; (*blah*)
-          ip_addr = Ipaddr.V4.localhost;
-        } in
-      EndpMap.fold (fun endp _ push_endp -> better_endpoint ip endp push_endp) endpoints local_endp
-      |> fun push_endpoint ->
-      Hashtbl.replace route_cache ip push_endpoint;
-      push_endpoint
+      let of_same_network Proto.{ip_addr; netmask} ip =
+        let network = Ipaddr.V4.Prefix.make netmask ip_addr in
+        Ipaddr.V4.Prefix.mem ip network
+      in
+      EndpMap.fold (fun endp _ acc ->
+          if of_same_network endp ip then endp :: acc
+          else acc) endpoints []
+      |> fun endp_lt ->
+      if 0 = List.length endp_lt then Error "no correspoinding endpoint"
+      else
+      let endp = List.hd endp_lt in
+      Hashtbl.replace route_cache ip endp;
+      Ok endp
     end
 
+  (* TODO: check if really to local http(s) service?  *)
   let is_to_local {endpoints} dst_ip =
     EndpMap.exists (fun endp _ -> 0 = Ipaddr.V4.compare dst_ip endp.Proto.ip_addr) endpoints
 
@@ -319,10 +313,13 @@ module Dispatcher = struct
       Local.write_to_service t.local dispatcher_mac Ethif_wire.IPv4 buf
     else if Policy.is_authorized_transport t.policy src_ip dst_ip then
       Log.debug (fun m -> m "Dispatcher: allowed pkt %a -> %a" Ipaddr.V4.pp_hum src_ip Ipaddr.V4.pp_hum dst_ip) >>= fun () ->
-      let push_endp = find_push_endpoint t dst_ip in
-      let _, push_fn = EndpMap.find push_endp t.endpoints in
-      push_fn @@ Some (buf, pkt);
-      Lwt.return_unit
+      match find_push_endpoint t dst_ip with
+      | Error msg ->
+          Log.err (fun m -> m "Dispatcher: authorized but %s, dropped %a -> %a" msg Ipaddr.V4.pp_hum src_ip Ipaddr.V4.pp_hum dst_ip)
+      | Ok push_endp ->
+          let _, push_fn = EndpMap.find push_endp t.endpoints in
+          push_fn @@ Some (buf, pkt);
+          Lwt.return_unit
     else Log.warn (fun m -> m "Dispatcher: dropped pkt %a -> %a" Ipaddr.V4.pp_hum src_ip Ipaddr.V4.pp_hum dst_ip)
 
 
@@ -340,6 +337,10 @@ module Dispatcher = struct
     Lwt.return drain_pkt
 
 
+  let correct_checksum ip_pkt =
+    (*TODO*)
+    ()
+
   (*from local stack in Server*)
   let set_local_listener t =
     let open Frame in
@@ -349,12 +350,17 @@ module Dispatcher = struct
       match parse buf with
       | Ok (Ethernet {dst = dst_mac; payload = (Ipv4 {dst = dst_ip} as pkt)})
         when 0 = Macaddr.compare dst_mac dispatcher_mac ->
-          let push_endp = find_push_endpoint t dst_ip in
-          Log.debug (fun m -> m "found endpoint to push: %s" @@ Proto.endp_to_string push_endp) >>= fun () ->
-          let _, push_fn = EndpMap.find push_endp t.endpoints in
-          let pkt_raw = Cstruct.shift buf Ethif_wire.sizeof_ethernet in
-          push_fn @@ Some (pkt_raw, pkt);
-          Lwt.return_unit
+          (match find_push_endpoint t dst_ip with
+          | Error msg ->
+              Log.err (fun m -> m "Dispatcher: local listener no push endpoint as %s for %a" msg Ipaddr.V4.pp_hum dst_ip)
+          | Ok push_endp ->
+              Log.debug (fun m -> m "found endpoint to push: %s" @@ Proto.endp_to_string push_endp) >>= fun () ->
+              let _, push_fn = EndpMap.find push_endp t.endpoints in
+              let pkt_raw = Cstruct.shift buf Ethif_wire.sizeof_ethernet in
+              Ipv4_wire.set_ipv4_src pkt_raw (Ipaddr.V4.to_int32 push_endp.Proto.ip_addr);
+              correct_checksum pkt_raw;
+              push_fn @@ Some (pkt_raw, pkt);
+              Lwt.return_unit)
       | Ok (Ethernet {src = tha; payload = Arp {op = `Request; spa = tpa; tpa = spa}}) ->
           let arp_resp =
             let open Arpv4_packet in
