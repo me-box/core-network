@@ -24,7 +24,7 @@ module Make (B: Vnetif.BACKEND) : sig
   val respond : ?headers:Cohttp.Header.t -> ?code:Cohttp.Code.status_code -> body -> Response.t
   val respond' : ?headers:Cohttp.Header.t -> ?code:Cohttp.Code.status_code -> body -> Response.t Lwt.t
 
-  val make: B.t -> t Lwt.t
+  val make: B.t -> Ipaddr.V4.t -> t Lwt.t
   val start: t -> ?port:int -> ?callback:callback -> unit -> unit Lwt.t
 end
 

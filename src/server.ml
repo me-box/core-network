@@ -111,12 +111,11 @@ module Make(Backend: Vnetif.BACKEND) = struct
       Http.respond ~headers ~body ~status:code ()
 
 
-  let make b =
+  let make b ip =
     or_fail "Vnetif.connect" @@ Vnet.connect b >>= fun net ->
     or_fail "E.connect" @@ E.connect net >>= fun ethif ->
     Mclock.connect () >>= fun clock ->
     or_fail "A.connect" @@ A.connect ethif clock >>= fun arp ->
-    let ip = Ipaddr.V4.unspecified in
     or_fail "I.connect" @@ I.connect ~ip ethif arp >>= fun i ->
     Lwt.return @@ Stdlibrandom.initialize () >>= fun () ->
     or_fail "Icmp.connect" @@ Icmp.connect i >>= fun icmp ->

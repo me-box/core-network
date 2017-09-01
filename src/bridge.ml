@@ -178,6 +178,8 @@ module Local = struct
     id: int;
     backend: Backend.t;
     service: Service.t;
+    address: Ipaddr.V4.t;
+    network: Ipaddr.V4.Prefix.t;
   }
 
   let create () =
@@ -191,9 +193,17 @@ module Local = struct
           Log.err (fun m -> m "Backend.register err: %a" Mirage_net.pp_error err)
           |> Lwt.ignore_result; -1
     in
-    Service.make backend >>= fun service ->
-    Lwt.return {id; backend; service}
+    let network, address =
+      match Br_env.system_network () with
+      | Some (n, a) -> n, a
+      | None ->
+          Lwt.ignore_result @@ Log.err (fun m -> m "required ENV for local address!");
+          assert false in
+    Service.make backend address >>= fun service ->
+    Lwt.return {id; backend; service; network; address}
 
+  let is_to_local {network} ip =
+    Ipaddr.V4.Prefix.mem ip network
 
   let write_to_service t source ethertype pkt =
     let open Ethif_packet in
@@ -289,9 +299,6 @@ module Dispatcher = struct
       Ok endp
     end
 
-  (* TODO: check if really to local http(s) service?  *)
-  let is_to_local {endpoints} dst_ip =
-    EndpMap.exists (fun endp _ -> 0 = Ipaddr.V4.compare dst_ip endp.Proto.ip_addr) endpoints
 
   let dispatch t endp (buf, pkt) =
     Log.info (fun m -> m "in dispatch %s(%d)" (Frame.fr_info pkt) (Cstruct.len buf)) >>= fun () ->
@@ -308,7 +315,7 @@ module Dispatcher = struct
       let _, push_fn = EndpMap.find endp t.endpoints in
       push_fn @@ Some (resp_buf, resp_pkt);
       Lwt.return_unit
-    else if is_to_local t dst_ip then
+    else if Local.is_to_local t.local dst_ip then
       Log.debug (fun m -> m "Dispatcher: allowed pkt[local] %a -> %a" Ipaddr.V4.pp_hum src_ip Ipaddr.V4.pp_hum dst_ip) >>= fun () ->
       Local.write_to_service t.local dispatcher_mac Ethif_wire.IPv4 buf
     else if Policy.is_authorized_transport t.policy src_ip dst_ip then
@@ -337,10 +344,6 @@ module Dispatcher = struct
     Lwt.return drain_pkt
 
 
-  let correct_checksum ip_pkt =
-    (*TODO*)
-    ()
-
   (*from local stack in Server*)
   let set_local_listener t =
     let open Frame in
@@ -352,13 +355,11 @@ module Dispatcher = struct
         when 0 = Macaddr.compare dst_mac dispatcher_mac ->
           (match find_push_endpoint t dst_ip with
           | Error msg ->
-              Log.err (fun m -> m "Dispatcher: local listener no push endpoint as %s for %a" msg Ipaddr.V4.pp_hum dst_ip)
+              Log.err (fun m -> m "Dispatcher: local no push endpoint as %s for %a, dropped" msg Ipaddr.V4.pp_hum dst_ip)
           | Ok push_endp ->
               Log.debug (fun m -> m "found endpoint to push: %s" @@ Proto.endp_to_string push_endp) >>= fun () ->
               let _, push_fn = EndpMap.find push_endp t.endpoints in
               let pkt_raw = Cstruct.shift buf Ethif_wire.sizeof_ethernet in
-              Ipv4_wire.set_ipv4_src pkt_raw (Ipaddr.V4.to_int32 push_endp.Proto.ip_addr);
-              correct_checksum pkt_raw;
               push_fn @@ Some (pkt_raw, pkt);
               Lwt.return_unit)
       | Ok (Ethernet {src = tha; payload = Arp {op = `Request; spa = tpa; tpa = spa}}) ->
