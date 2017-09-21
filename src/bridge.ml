@@ -99,6 +99,12 @@ module Dns_service = struct
 end
 
 
+module NAT = struct
+  let dns_rewriter t src_ip dst_ip = ()
+  let translate t src_ip dst_ip = ()
+end
+
+
 module RMap = Map.Make(struct
     type t = Ipaddr.V4.t
     let compare = Ipaddr.V4.compare
@@ -386,7 +392,7 @@ end
 
 
 let rec from_endpoint conn push_in =
-  Proto.Server.recv conn >>= fun buf ->
+  Proto.Server.recv_pkt conn >>= fun buf ->
   (*hexdump_buf_debug "from_endpoint" buf >>= fun () ->*)
   Frame.parse_ipv4_pkt buf |> function
   | Ok fr ->
@@ -402,7 +408,7 @@ let rec to_endpoint conn out_s =
   Lwt_stream.get out_s >>= function
   | Some (buf, _) ->
       (*hexdump_buf_debug "to_endpoint" buf >>= fun () ->*)
-      Proto.Server.send conn buf >>= fun () ->
+      Proto.Server.send_pkt conn buf >>= fun () ->
       to_endpoint conn out_s
   | None ->
       Log.warn (fun m -> m "output stream closed ?!")

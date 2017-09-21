@@ -109,11 +109,15 @@ let existed_intf t =
       with Not_found -> acc) [] lines
   |> fun existed ->
   Log.info (fun m -> m "found %d existed phy interfaces" (List.length existed)) >>= fun () ->
-  Lwt_list.iter_p (fun (dev, addr) ->
+  (*Lwt_list.iter_p (fun (dev, addr) ->
       create_connector dev addr >>= fun () ->
       start_connector dev addr >>= (function
         | Ok (Unix.WEXITED 0) -> Lwt.return @@ Hashtbl.add t addr dev
-        | _ -> remove_connector dev)) existed
+        | _ -> remove_connector dev)) existed*)
+  Lwt_list.iter_p (fun (dev, addr) ->
+      Hashtbl.add t addr dev;
+      Lwt.return @@ Connector.start dev addr) existed
+
 
 
 let  monitor v () =
@@ -135,17 +139,21 @@ let  monitor v () =
         | Some (`Up (dev, addr)) ->
             Log.debug (fun m -> m "link up: %s" l) >>= fun () ->
             Log.info (fun m -> m "link up: %s %s" dev addr) >>= fun () ->
-            create_connector dev addr >>= fun () ->
+            (*create_connector dev addr >>= fun () ->
             start_connector dev addr >>= (function
               | Ok (Unix.WEXITED 0) ->
                   Hashtbl.add connectors addr dev;
                   m ()
-              | _ -> remove_connector dev >>= m)
+              | _ -> remove_connector dev >>= m)*)
+            Hashtbl.add connectors addr dev;
+            Lwt.return @@ Connector.start dev addr >>= fun () ->
+            m ()
         | Some (`Down addr) ->
             let dev = Hashtbl.find connectors addr in
             Log.debug (fun m -> m "link down: %s" l) >>= fun () ->
             Log.info (fun m -> m "link down: %s %s" dev addr) >>= fun () ->
-            remove_connector dev >>= fun () ->
+            Hashtbl.remove connectors addr;
+            (*remove_connector dev >>= fun () ->*)
             m ()
   in
 

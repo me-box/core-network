@@ -1,5 +1,0 @@
-PKG mirage
-PKG mirage-types-lwt
-PKG tcpip.ethif
-
-B _build
