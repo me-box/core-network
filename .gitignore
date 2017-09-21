@@ -30,3 +30,5 @@ setup.log
 
 exp
 driver/connector
+*.merlin
+test
