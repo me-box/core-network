@@ -181,6 +181,8 @@ end
 
 module Server = struct
 
+  type client_connection = Cstruct.t Lwt_stream.t * command Lwt_stream.t * Lwt_io.output Lwt_io.channel
+
   let bind path =
     Lwt.catch (fun () ->
         Lwt_unix.unlink path)
