@@ -28,7 +28,7 @@ module Dns_service = struct
     | _ -> Lwt.fail (Invalid_argument "Not dns query")
 
 
-  let rec ip_of_name n () =
+  let rec try_resolve n () =
     Lwt.catch
       (fun () ->
          let open Lwt_unix in
@@ -40,8 +40,19 @@ module Dns_service = struct
              |> Ipaddr.V4.of_string_exn)
          |> fun ips -> Lwt.return @@ `Resolved (List.hd ips))
       (function
-      | Not_found -> Lwt.return @@ `Later (ip_of_name n)
+      | Not_found -> Lwt.return @@ `Later (n, try_resolve n)
       | e -> Lwt.fail e)
+
+
+  let ip_of_name ?(sleep_time = 2.) n =
+    try_resolve n () >>= fun maybe_ip ->
+    let rec keep_trying = function
+    | `Later (n, to_resolve) ->
+        Log.debug (fun m -> m "to resolve %s after %fs" n sleep_time) >>= fun () ->
+        Lwt_unix.sleep sleep_time >>= fun () ->
+        to_resolve () >>= keep_trying
+    | `Resolved ip -> Lwt.return ip in
+    keep_trying maybe_ip
 
 
   let to_dns_response t pkt resp =
@@ -77,30 +88,107 @@ module Dns_service = struct
     | _ -> assert false
 
 
-  let process_dns_query ~predicate pkt =
+  let process_dns_query ~resolve pkt =
     let open Dns in
     query_of_pkt pkt >>= fun query ->
     begin
       let names = Packet.(List.map (fun {q_name; _} -> q_name) query.questions) in
       let name = List.hd names |> Name.to_string in
-      if predicate name then
-        Log.info (fun m -> m "Dns_service: allowed to resolve %s" name) >>= fun () ->
-        ip_of_name name >>= fun resolved ->
-        let name = Dns.Name.of_string name in
-        let rrs = Dns.Packet.[{ name; cls = RR_IN; flush = false; ttl = 0l; rdata = A resolved }] in
-        Lwt.return Dns.Query.({ rcode = NoError; aa = true; answer = rrs; authority = []; additional = []})
-      else
-      Log.info (fun m -> m "Dns_service: banned to resolve %s" name) >>= fun () ->
-      Lwt.return Query.({rcode = Packet.NXDomain; aa = true; answer = []; authority = []; additional = []})
+      match resolve name with
+      | Some resolved ->
+          Log.info (fun m -> m "Dns_service: allowed to resolve %s" name) >>= fun () ->
+          let name = Dns.Name.of_string name in
+          let rrs = Dns.Packet.[{ name; cls = RR_IN; flush = false; ttl = 0l; rdata = A resolved }] in
+          Lwt.return Dns.Query.({ rcode = NoError; aa = true; answer = rrs; authority = []; additional = []})
+      | None ->
+          Log.info (fun m -> m "Dns_service: banned to resolve %s" name) >>= fun () ->
+          Lwt.return Query.({rcode = Packet.NXDomain; aa = true; answer = []; authority = []; additional = []})
     end >>= fun answer ->
     let resp = Query.response_of_answer query answer in
     Lwt.return @@ Packet.marshal resp
 end
 
 
+type pair = Ipaddr.V4.t * Ipaddr.V4.t
+
+
 module NAT = struct
-  let dns_rewriter t src_ip dst_ip = ()
-  let translate t src_ip dst_ip = ()
+
+  module PairMap = Map.Make(struct
+      type t = pair
+      let compare (xx, xy) (yx, yy) =
+        let open Ipaddr.V4 in
+        if compare xx yx = 0 && compare xy yy = 0 then 0
+        else compare xx yy
+    end)
+
+  type  t = {
+    mutable translation: pair PairMap.t;
+    mutable rule_handles: pair PairMap.t;
+  }
+
+  let add_rule t px py =
+    t.translation <- PairMap.add px py t.translation;
+    let handle = fst px, snd py in
+    t.rule_handles <- PairMap.add handle px t.rule_handles;
+    Lwt.return_unit
+
+  let remove_rule t handle =
+    (if PairMap.mem handle t.rule_handles then
+       let rule_key = PairMap.find handle t.rule_handles in
+       let fake_dst = snd rule_key in
+       t.translation <- PairMap.remove rule_key t.translation;
+       t.rule_handles <- PairMap.remove handle t.rule_handles;
+       fake_dst
+     else fst handle)
+    |> Lwt.return
+
+  let set_ipv4_checksum buf ihl =
+    let hd = Cstruct.sub buf 0 (4 * ihl) in
+    Ipv4_wire.set_ipv4_csum buf 0;
+    let csum = Tcpip_checksum.ones_complement hd in
+    Ipv4_wire.set_ipv4_csum buf csum
+
+  let set_udp_checksum buf ph =
+    Udp_wire.set_udp_checksum buf 0;
+    let csum = Tcpip_checksum.ones_complement_list [ph; buf] in
+    Udp_wire.set_udp_checksum buf csum
+
+  let set_tcp_checksum buf ph =
+    Tcp.Tcp_wire.set_tcp_checksum buf 0;
+    let csum = Tcpip_checksum.ones_complement_list [ph; buf] in
+    Tcp.Tcp_wire.set_tcp_checksum buf csum
+
+  let translate t p_orig (buf, pkt) =
+    (* pkt actually doesn't matter as not transmitted *)
+    let open Frame in
+    let src_ip, dst_ip = PairMap.find p_orig t.translation in
+    let not_expected log =
+      Log.err (fun m -> m "%s not expected value in match" log) >>= fun () ->
+      Lwt.fail (Invalid_argument log) in
+    match pkt with
+    | Ipv4 {ihl; raw = nat_buf; payload} ->
+        Ipv4_wire.set_ipv4_src nat_buf (Ipaddr.V4.to_int32 src_ip);
+        Ipv4_wire.set_ipv4_dst nat_buf (Ipaddr.V4.to_int32 dst_ip);
+        set_ipv4_checksum nat_buf ihl;
+        (match payload with
+        | Udp {len; raw = udp_buf} ->
+            let ph = Ipv4_packet.Marshal.pseudoheader ~src:src_ip ~dst:dst_ip ~proto:`UDP len in
+            set_udp_checksum udp_buf ph
+        | Tcp {raw = tcp_buf} ->
+            let len = Cstruct.len tcp_buf in
+            let ph = Ipv4_packet.Marshal.pseudoheader ~src:src_ip ~dst:dst_ip ~proto:`TCP len in
+            set_tcp_checksum tcp_buf ph
+        | Icmp _ -> ()
+        | _ -> Lwt.ignore_result @@ not_expected "ipv4_payload");
+          Lwt.return (nat_buf, pkt)
+    | _ -> not_expected "translate_operand"
+
+
+  let create () =
+    let translation = PairMap.empty in
+    let rule_handles = PairMap.empty in
+    {translation; rule_handles}
 end
 
 
@@ -109,68 +197,216 @@ module IpMap = Map.Make(struct
     let compare = Ipaddr.V4.compare
   end)
 
+
+module Endpoints = struct
+
+  module EndpMap = Map.Make(struct
+      type t = Proto.endpoint
+      let compare x y = Pervasives.compare x.Proto.interface y.Proto.interface
+    end)
+
+  module EndpSet = Set.Make(struct
+      type t = Proto.endpoint
+      let compare x y = Pervasives.compare x.Proto.interface y.Proto.interface
+    end)
+
+  module ReqMap = Map.Make(struct type t = int32 let compare = Pervasives.compare end)
+
+  type t = {
+    mutable endp_set: EndpSet.t;
+    mutable connections: Proto.Server.client_connection EndpMap.t;
+    mutable push_fn: ((Cstruct.t * Frame.t) option -> unit) EndpMap.t;
+    mutable push_cache: Proto.endpoint IpMap.t;
+    mutable req_queue: (Ipaddr.V4.t Lwt.u) ReqMap.t;
+    mutex: Lwt_mutex.t;
+  }
+
+  let endp_to_push t dst =
+    Lwt_mutex.with_lock t.mutex (fun () ->
+        (if IpMap.mem dst t.push_cache then Some (IpMap.find dst t.push_cache) else
+         EndpSet.fold (fun endp acc ->
+             match acc with
+             | Some _ -> acc
+             | None ->
+                 let network = Ipaddr.V4.Prefix.make endp.netmask endp.ip_addr in
+                 if not @@ Ipaddr.V4.Prefix.mem dst network then acc else
+                 let push_cache = IpMap.add dst endp t.push_cache in
+                 t.push_cache <- push_cache;
+                 Some endp) t.endp_set None)
+        |> Lwt.return)
+
+
+  let to_push t dst dg =
+    endp_to_push t dst >>= function
+    | None ->
+        Log.warn (fun m -> m "no endp to push for %a, drop" pp_ip dst)
+    | Some endp ->
+        let push_fn = EndpMap.find endp t.push_fn in
+        push_fn (Some dg);
+        Lwt.return_unit
+
+
+  let rec comm_monitor t conn =
+    let open Proto in
+    Proto.Server.recv_comm conn >>= function
+    | ACK (ip, id) ->
+        Lwt_mutex.with_lock t.mutex (fun () ->
+            let wakener = ReqMap.find id t.req_queue in
+            Lwt.wakeup wakener ip;
+            t.req_queue <- ReqMap.remove id t.req_queue;
+            Lwt.return_unit) >>= fun () ->
+        comm_monitor t conn
+    | IP_DUP dup ->
+        Log.warn (fun m -> m "DUPLICATE: %a!" pp_ip dup) >>= fun () ->
+        comm_monitor t conn
+    | IP_REQ _ ->
+        Log.err (fun m -> m "IP_REQ from client?!") >>= fun () ->
+        comm_monitor t conn
+
+
+  let _req_id = ref 0l
+  let req_id () =
+    let id = !_req_id in
+    _req_id := Int32.pred id;
+    id
+
+  let claim_fake_dst t ip =
+    let fake, u = Lwt.wait () in
+    Lwt_mutex.with_lock t.mutex (fun () ->
+        endp_to_push t ip >>= function
+        | None ->
+            Log.err (fun m -> m "no endp to fake dst for %a" pp_ip ip) >>= fun () ->
+            Lwt.fail_with "claim_fake_dst"
+        | Some endp ->
+            let id = req_id () in
+            let comm = Proto.IP_REQ id in
+            let conn = EndpMap.find endp t.connections in
+            Proto.Server.send_comm conn comm >>= fun () ->
+            fake)
+
+  let register_endpoint t endp conn push =
+    Lwt.async (fun () -> comm_monitor t conn);
+    Lwt_mutex.with_lock t.mutex (fun () ->
+        if not @@ EndpSet.mem endp t.endp_set then
+          let endp_set = EndpSet.add endp t.endp_set in
+          let connections = EndpMap.add endp conn t.connections in
+          let push_fn = EndpMap.add endp push t.push_fn in
+          t.endp_set <- endp_set;
+          t.connections <- connections;
+          t.push_fn <- push_fn;
+          Lwt.return_unit
+        else Lwt.return_unit)
+
+
+  let create () : t =
+    let endp_set = EndpSet.empty in
+    let connections = EndpMap.empty in
+    let push_fn = EndpMap.empty in
+    let push_cache = IpMap.empty in
+    let req_queue = ReqMap.empty in
+    let mutex = Lwt_mutex.create () in
+    {endp_set; connections; push_fn; push_cache; req_queue; mutex}
+end
+
+
+
 module Policy = struct
 
-  type p = Ipaddr.V4.t * Ipaddr.V4.t
   module PairSet = Set.Make(struct
-      type t = p
+      type t = pair
       let compare (xx, xy) (yx, yy) =
         let open Ipaddr.V4 in
-        if (compare xx yx = 0 && compare xy yy = 0)
-        || (compare xx yy = 0 && compare xy yx = 0) then 0
+        if compare xx yx = 0 && compare xy yy = 0 then 0
         else compare xx yy
     end)
 
   type t = {
     mutable transport: PairSet.t;
-    mutable resolve: string list IpMap.t;
+    mutable resolve: (string * Ipaddr.V4.t) list IpMap.t;
+    endpoints: Endpoints.t;
+    nat: NAT.t;
   }
 
-  let allow_resolve ip n resolve =
-    if RMap.mem ip resolve
+  let allow_resolve t src_ip name dst_ip =
+    if IpMap.mem src_ip t.resolve
     then
-      let names = RMap.find ip resolve in
-      if List.mem n names then resolve
-      else RMap.add ip (n :: names) @@ RMap.remove ip resolve
-    else RMap.add ip [n] resolve
+      let names = IpMap.find src_ip t.resolve in
+      let names' = (name, dst_ip) :: (List.remove_assoc name names) in
+      t.resolve <- IpMap.add src_ip names' t.resolve
+    else t.resolve <- IpMap.add src_ip [name, dst_ip] t.resolve;
+    Lwt.return_unit
 
-  let forbidden_resolve ip n resolve =
-    if RMap.mem ip resolve
+  let allow_transport t src_ip dst_ip =
+    t.transport <- PairSet.add (src_ip, dst_ip) t.transport;
+    Lwt.return_unit
+
+  let forbidden_resolve t src_ip name =
+    if IpMap.mem src_ip t.resolve
     then
-      let names = RMap.find ip resolve in
-      if List.mem n names then
-        let names' = List.filter ((<>) n) names in
-        RMap.add ip names' @@ RMap.remove ip resolve
-      else resolve
-    else resolve
+      let names = IpMap.find src_ip t.resolve in
+      let names' = List.remove_assoc name names in
+      t.resolve <- IpMap.add src_ip names' t.resolve;
+      Lwt.return_unit
+    else Lwt.return_unit
+
+  let forbidden_transport t src_ip dst_ip =
+    t.transport <- PairSet.remove (src_ip, dst_ip) t.transport;
+    Lwt.return_unit
+
+
+  let process_allowed_pair t nx ny =
+    Lwt_list.map_s Dns_service.ip_of_name [nx; ny] >>= fun ips ->
+    let ipx = List.hd ips
+    and ipy = List.hd @@ List.tl ips in
+    (* dns request from ipx for ny should return ipy' *)
+    (* dns request from ipy for nx should return ipx' *)
+    Endpoints.claim_fake_dst t.endpoints ipx >>= fun ipy' ->
+    Endpoints.claim_fake_dst t.endpoints ipy >>= fun ipx' ->
+    allow_resolve t ipx ny ipy' >>= fun () ->
+    allow_resolve t ipy nx ipx' >>= fun () ->
+    (* NAT: ipx -> ipy' => ipx' -> ipy *)
+    (* NAT: ipy -> ipx' => ipy' -> ipx *)
+    allow_transport t ipx ipy' >>= fun () ->
+    allow_transport t ipy ipx' >>= fun () ->
+    NAT.add_rule t.nat (ipx, ipy') (ipx', ipy) >>= fun () ->
+    NAT.add_rule t.nat (ipy, ipx') (ipy', ipx) >>= fun () ->
+    Lwt.return_unit
 
 
   let allow_pair t nx ny =
-    Dns_service.ip_of_name nx () >>= fun ipx ->
-    Dns_service.ip_of_name ny () >>= fun ipy ->
-    t.transport <- t.transport |> PSet.add (ipx, ipy);
-    t.resolve <- t.resolve |> allow_resolve ipx ny |> allow_resolve ipy nx;
-    Log.info (fun m -> m "Policy.allow %s <> %s" nx ny) >>= fun () ->
+    Lwt.async (fun () ->
+        process_allowed_pair t nx ny >>= fun () ->
+        Log.info (fun m -> m "Policy.allow %s <> %s" nx ny));
     Lwt.return_unit
+
 
   let forbidden_pair t nx ny =
     Dns_service.ip_of_name nx >>= fun ipx ->
     Dns_service.ip_of_name ny >>= fun ipy ->
-    t.transport <- t.transport |> PSet.remove (ipx, ipy);
-    t.resolve <- t.resolve |> forbidden_resolve ipx ny |> forbidden_resolve ipy nx;
-    Log.info (fun m -> m "Policy.forbidden %s <> %s" nx ny) >>= fun () ->
+    forbidden_resolve t ipx ny >>= fun () ->
+    forbidden_resolve t ipy nx >>= fun () ->
+    NAT.remove_rule t.nat (ipx, ipy) >>= fun ipy' ->
+    NAT.remove_rule t.nat (ipy, ipx) >>= fun ipx' ->
+    forbidden_transport t ipx ipy' >>= fun () ->
+    forbidden_transport t ipy ipx' >>= fun () ->
     Lwt.return_unit
 
+
   let is_authorized_transport {transport; _} ipx ipy =
-    PSet.mem (ipx, ipy) transport
+    PairSet.mem (ipx, ipy) transport
 
-  let is_authorized_resolve {resolve; _} ip n =
-    RMap.mem ip resolve && List.mem n @@ RMap.find ip resolve
+  let is_authorized_resolve t ip name =
+    if IpMap.mem ip t.resolve then
+      let names = IpMap.find ip t.resolve in
+      if not @@ List.mem_assoc name names then None
+      else Some (List.assoc name names)
+    else None
 
-  let create () =
-    let transport = PSet.empty in
-    let resolve = RMap.empty in
-    {transport; resolve}
+
+  let create endpoints nat () =
+    let transport = PairSet.empty in
+    let resolve = IpMap.empty in
+    {transport; resolve; endpoints; nat}
 end
 
 
@@ -266,81 +502,13 @@ module Local = struct
 end
 
 
-module Endpoints = struct
-
-  module EndpMap = Map.Make(struct
-      type t = Proto.endpoint
-      let compare x y = Pervasives.compare x.Proto.interface y.Proto.interface
-    end)
-
-  module EndpSet = Set.Make(struct
-      type t = Proto.endpoint
-      let compare x y = Pervasives.compare x.Proto.interface y.Proto.interface
-    end)
-
-  type t = {
-    mutable endp_set: EndpSet.t;
-    mutable connections: Proto.Server.client_connection EndpMap.t;
-    mutable push_fn: ((Cstruct.t * Frame.t) option -> unit) EndpMap.t;
-    mutable push_cache: ((Cstruct.t * Frame.t) option -> unit) IpMap.t;
-    mutex: Lwt_mutex.t;
-  }
-
-  let endp_to_push t dst =
-    Lwt_mutex.with_lock t.mutex (fun () ->
-        (if IpMap.mem dst t.push_cache then Some (IpMap.find dst t.push_cache) else
-         EndpSet.fold (fun endp acc ->
-             match acc with
-             | Some _ -> acc
-             | None ->
-                 let network = Ipaddr.V4.Prefix.make endp.netmask endp.ip_addr in
-                 if not @@ Ipaddr.V4.Prefix.mem dst network then acc else
-                 let push_fn = EndpMap.find endp t.push_fn in
-                let push_cache = IpMap.add dst push_fn t.push_cache in
-                 t.push_cache <- push_cache;
-                 Some push_fn) t.endp_set None)
-        |> Lwt.return)
-
-
-  let to_push t dst dg =
-    endp_to_push t dst >>= function
-    | None ->
-        Log.warn (fun m -> m "no endp to push for %a, drop" pp_ip dst)
-    | Some push_fn ->
-        push_fn dg;
-        Lwt.return_unit
-
-
-  let register_endpoint t endp conn push =
-    Lwt_mutex.with_lock t.mutex (fun () ->
-        if not @@ EndpSet.mem endp t.endp_set then
-          let endp_set = EndpSet.add endp t.endp_set in
-          let connections = EndpMap.add endp conn t.connections in
-          let push_fn = EndpMap.add endp push t.push_fn in
-          t.endp_set <- endp_set;
-          t.connections <- connections;
-          t.push_fn <- push_fn;
-          Lwt.return_unit
-        else Lwt.return_unit)
-
-
-  let create () : t =
-    let endp_set = EndpSet.empty in
-    let connections = EndpMap.empty in
-    let push_fn = EndpMap.empty in
-    let push_cache = IpMap.empty in
-    let mutex = Lwt_mutex.create () in
-    {endp_set; connections; push_fn; push_cache; mutex}
-end
-
-
-
 module Dispatcher = struct
 
   type t = {
     endpoints: Endpoints.t;
     local: Local.t;
     policy: Policy.t;
+    nat: NAT.t;
   }
 
   let dispatcher_mac = Macaddr.make_local (fun x -> x + 1)
@@ -354,16 +522,17 @@ module Dispatcher = struct
           assert false in
     if Dns_service.is_dns_query pkt then
       Log.info (fun m -> m "Dispatcher: a dns query from %a" pp_ip src_ip) >>= fun () ->
-      let predicate = Policy.is_authorized_resolve t.policy src_ip in
-      Dns_service.process_dns_query ~predicate pkt >>= fun resp ->
+      let resolve = Policy.is_authorized_resolve t.policy src_ip in
+      Dns_service.process_dns_query ~resolve pkt >>= fun resp ->
       let resp = Dns_service.to_dns_response t pkt resp in
-      Endpoints.to_push t.endpoints dst_ip @@ Some resp
+      Endpoints.to_push t.endpoints dst_ip resp
     else if Local.is_to_local t.local dst_ip then
       Log.debug (fun m -> m "Dispatcher: allowed pkt[local] %a -> %a" pp_ip src_ip pp_ip dst_ip) >>= fun () ->
       Local.write_to_service t.local dispatcher_mac Ethif_wire.IPv4 buf
     else if Policy.is_authorized_transport t.policy src_ip dst_ip then
       Log.debug (fun m -> m "Dispatcher: allowed pkt %a -> %a" pp_ip src_ip pp_ip dst_ip) >>= fun () ->
-      Endpoints.to_push t.endpoints dst_ip @@ Some (buf, pkt)
+      NAT.translate t.nat (src_ip, dst_ip) (buf, pkt) >>= fun (nat_buf, nat_pkt) ->
+      Endpoints.to_push t.endpoints dst_ip (nat_buf, nat_pkt)
     else Log.warn (fun m -> m "Dispatcher: dropped pkt %a -> %a" pp_ip src_ip pp_ip dst_ip)
 
 (*
@@ -391,7 +560,7 @@ module Dispatcher = struct
       | Ok (Ethernet {dst = dst_mac; payload = (Ipv4 {dst = dst_ip} as pkt)})
         when 0 = Macaddr.compare dst_mac dispatcher_mac ->
           let pkt_raw = Cstruct.shift buf Ethif_wire.sizeof_ethernet in
-          Endpoints.to_push t.endpoints dst_ip @@ Some (pkt_raw, pkt)
+          Endpoints.to_push t.endpoints dst_ip (pkt_raw, pkt)
       | Ok (Ethernet {src = tha; payload = Arp {op = `Request; spa = tpa; tpa = spa}}) ->
           let arp_resp =
             let open Arpv4_packet in
@@ -408,8 +577,8 @@ module Dispatcher = struct
     in
     Local.Backend.set_listen_fn t.local.backend t.local.id listener
 
-  let create local policy endpoints =
-    {endpoints; local; policy}
+  let create local policy endpoints nat =
+    {endpoints; local; policy; nat}
 end
 
 
@@ -452,9 +621,10 @@ let main path v =
 
   Proto.Server.bind path >>= fun server ->
   Local.create () >>= fun local ->
-  let policy = Policy.create () in
   let endpoints = Endpoints.create () in
-  let disp = Dispatcher.create local policy endpoints in
+  let nat = NAT.create () in
+  let policy = Policy.create endpoints nat () in
+  let disp = Dispatcher.create local policy endpoints nat in
   let serve_endp endp conn =
     let in_s, push_in = Lwt_stream.create () in
     let out_s, push_out = Lwt_stream.create () in

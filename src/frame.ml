@@ -2,9 +2,9 @@
 type t =
   | Ethernet: { src: Macaddr.t; dst: Macaddr.t; payload: t } -> t
   | Arp:      { op: [ `Request | `Reply | `Unknown ]; sha: Macaddr.t; spa: Ipaddr.V4.t; tha: Macaddr.t; tpa: Ipaddr.V4.t} -> t
-  | Icmp:     { raw: Cstruct.t; payload: t } -> t
   | Ipv4:     { src: Ipaddr.V4.t; dst: Ipaddr.V4.t; dnf: bool; ihl: int; raw: Cstruct.t; payload: t } -> t
-  | Udp:      { src: int; dst: int; len: int; payload: t } -> t
+  | Icmp:     { raw: Cstruct.t; payload: t } -> t
+  | Udp:      { src: int; dst: int; len: int; raw: Cstruct.t; payload: t } -> t
   | Tcp:      { src: int; dst: int; syn: bool; raw: Cstruct.t; payload: t } -> t
   | Payload:  Cstruct.t -> t
   | Unknown:  t
@@ -44,7 +44,7 @@ let parse_ipv4_pkt inner =
       let _id     = Cstruct.BE.get_uint16 inner 4 in
       let _seq    = Cstruct.BE.get_uint16 inner 6 in
       let payload = Cstruct.shift         inner 8 in
-      Ok (Icmp { raw; payload = Payload payload })
+      Ok (Icmp { raw = inner; payload = Payload payload })
   | 6 ->
       need_space_for inner 14 "TCP header"
       >>= fun () ->
@@ -65,7 +65,7 @@ let parse_ipv4_pkt inner =
       let len     = Cstruct.BE.get_uint16 inner 4 in
       let payload = Cstruct.shift         inner 8 in
       let len = len - 8 in (* subtract header length *)
-      Ok (Udp { src; dst; len; payload = Payload payload })
+      Ok (Udp { src; dst; len; raw = inner; payload = Payload payload })
   | _ ->
       Error (`Msg (Printf.sprintf "unrecognized proto: %d" proto)))
   (*Ok Unknown *)
