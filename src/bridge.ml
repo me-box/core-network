@@ -48,10 +48,12 @@ module Dns_service = struct
     try_resolve n () >>= fun maybe_ip ->
     let rec keep_trying = function
     | `Later (n, to_resolve) ->
-        Log.debug (fun m -> m "to resolve %s after %fs" n sleep_time) >>= fun () ->
+        Log.info (fun m -> m "to resolve %s after %fs" n sleep_time) >>= fun () ->
         Lwt_unix.sleep sleep_time >>= fun () ->
         to_resolve () >>= keep_trying
-    | `Resolved ip -> Lwt.return ip in
+    | `Resolved ip ->
+        Log.info (fun m -> m "resolved: %a" pp_ip ip) >>= fun () ->
+        Lwt.return ip in
     keep_trying maybe_ip
 
 
@@ -131,7 +133,9 @@ module NAT = struct
     t.translation <- PairMap.add px py t.translation;
     let handle = fst px, snd py in
     t.rule_handles <- PairMap.add handle px t.rule_handles;
-    Lwt.return_unit
+    Log.info (fun m -> m "new NAT rule: (%a -> %a) => (%a -> %a)"
+                 pp_ip (fst px) pp_ip (snd px) pp_ip (fst py) pp_ip (snd py))
+
 
   let remove_rule t handle =
     (if PairMap.mem handle t.rule_handles then
@@ -181,7 +185,7 @@ module NAT = struct
             set_tcp_checksum tcp_buf ph
         | Icmp _ -> ()
         | _ -> Lwt.ignore_result @@ not_expected "ipv4_payload");
-          Lwt.return (nat_buf, pkt)
+        Lwt.return (src_ip, dst_ip, nat_buf, pkt)
     | _ -> not_expected "translate_operand"
 
 
@@ -250,6 +254,7 @@ module Endpoints = struct
     let open Proto in
     Proto.Server.recv_comm conn >>= function
     | ACK (ip, id) ->
+        Log.info (fun m -> m "ACK %a %ld" pp_ip ip id) >>= fun () ->
         Lwt_mutex.with_lock t.mutex (fun () ->
             let wakener = ReqMap.find id t.req_queue in
             Lwt.wakeup wakener ip;
@@ -263,6 +268,10 @@ module Endpoints = struct
         Log.err (fun m -> m "IP_REQ from client?!") >>= fun () ->
         comm_monitor t conn
 
+  let enqueue_req t id u =
+    Lwt_mutex.with_lock t.mutex (fun () ->
+        t.req_queue <- ReqMap.add id u t.req_queue;
+        Lwt.return_unit)
 
   let _req_id = ref 0l
   let req_id () =
@@ -272,17 +281,18 @@ module Endpoints = struct
 
   let claim_fake_dst t ip =
     let fake, u = Lwt.wait () in
-    Lwt_mutex.with_lock t.mutex (fun () ->
-        endp_to_push t ip >>= function
-        | None ->
-            Log.err (fun m -> m "no endp to fake dst for %a" pp_ip ip) >>= fun () ->
-            Lwt.fail_with "claim_fake_dst"
-        | Some endp ->
-            let id = req_id () in
-            let comm = Proto.IP_REQ id in
-            let conn = EndpMap.find endp t.connections in
-            Proto.Server.send_comm conn comm >>= fun () ->
-            fake)
+    endp_to_push t ip >>= function
+    | None ->
+        Log.err (fun m -> m "no endp to fake dst for %a" pp_ip ip) >>= fun () ->
+        Lwt.fail_with "claim_fake_dst"
+    | Some endp ->
+        let id = req_id () in
+        let comm = Proto.IP_REQ id in
+        let conn = EndpMap.find endp t.connections in
+        Log.info (fun m -> m "IP_REQ %ld on %s(%a) for %a" id endp.interface pp_ip endp.ip_addr pp_ip ip) >>= fun () ->
+        enqueue_req t id u >>= fun () ->
+        Proto.Server.send_comm conn comm >>= fun () ->
+        fake
 
   let register_endpoint t endp conn push =
     Lwt.async (fun () -> comm_monitor t conn);
@@ -334,7 +344,8 @@ module Policy = struct
       let names' = (name, dst_ip) :: (List.remove_assoc name names) in
       t.resolve <- IpMap.add src_ip names' t.resolve
     else t.resolve <- IpMap.add src_ip [name, dst_ip] t.resolve;
-    Lwt.return_unit
+    Log.info (fun m -> m "allow %a to resolve %s (as %a)" pp_ip src_ip name pp_ip dst_ip)
+
 
   let allow_transport t src_ip dst_ip =
     t.transport <- PairSet.add (src_ip, dst_ip) t.transport;
@@ -531,8 +542,9 @@ module Dispatcher = struct
       Local.write_to_service t.local dispatcher_mac Ethif_wire.IPv4 buf
     else if Policy.is_authorized_transport t.policy src_ip dst_ip then
       Log.debug (fun m -> m "Dispatcher: allowed pkt %a -> %a" pp_ip src_ip pp_ip dst_ip) >>= fun () ->
-      NAT.translate t.nat (src_ip, dst_ip) (buf, pkt) >>= fun (nat_buf, nat_pkt) ->
-      Endpoints.to_push t.endpoints dst_ip (nat_buf, nat_pkt)
+      NAT.translate t.nat (src_ip, dst_ip) (buf, pkt) >>= fun (nat_src_ip, nat_dst_ip, nat_buf, nat_pkt) ->
+      Log.info (fun m -> m "Dispatcher: after NAT %a -> %a" pp_ip nat_src_ip pp_ip nat_dst_ip) >>= fun () ->
+      Endpoints.to_push t.endpoints nat_dst_ip (nat_buf, nat_pkt)
     else Log.warn (fun m -> m "Dispatcher: dropped pkt %a -> %a" pp_ip src_ip pp_ip dst_ip)
 
 (*

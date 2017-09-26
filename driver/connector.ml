@@ -19,7 +19,7 @@ module Make(N: NETWORK)(E: ETHIF)(Arp: ARP)(Ip: IPV4) = struct
   }
 
   let _free_ip_cnt = 2
-  let _detect_duplicates_sleep = 5000. (* ms *)
+  let _detect_duplicates_sleep = 30. (* ms *)
 
   let count_free ipp =
     Lwt_mutex.with_lock ipp.mutex (fun () ->
@@ -72,10 +72,9 @@ module Make(N: NETWORK)(E: ETHIF)(Arp: ARP)(Ip: IPV4) = struct
         | Error _ -> Lwt.return_unit)
 
 
-  let populate_pool ipp arp cond Proto.({interface; netmask}) =
+  let populate_pool ipp arp cond Proto.({ip_addr; netmask}) =
     let network =
-      let ip = Ipaddr.V4.of_string_exn interface in
-      let prefix = Ipaddr.V4.Prefix.make netmask ip in
+      let prefix = Ipaddr.V4.Prefix.make netmask ip_addr in
       Ipaddr.V4.Prefix.network prefix in
     let last_added =
       let net = Ipaddr.V4.to_int32 network in
@@ -91,7 +90,9 @@ module Make(N: NETWORK)(E: ETHIF)(Arp: ARP)(Ip: IPV4) = struct
         let candidate = next () in
         Arp.query arp candidate >>= function
         | Ok _ -> count_and_put ()
-        | Error _ -> put_ip ipp candidate
+        | Error _ ->
+            put_ip ipp candidate >>= fun () ->
+            count_and_put ()
       else Lwt_condition.wait cond >>= count_and_put
     in
     count_and_put ()
@@ -212,7 +213,7 @@ end
 
 
 let start dev addr =
-  let t =
+  let t () =
     Netif.connect dev >>= fun net ->
     Mclock.connect () >>= fun mclock ->
     Ethif.connect net >>= fun ethif ->
@@ -227,7 +228,7 @@ let start dev addr =
   in
   Lwt.async (fun () ->
       Lwt.finalize (fun () ->
-          Lwt.catch (fun () -> t) (fun exn ->
+          Lwt.catch (fun () -> t ()) (fun exn ->
               Log.err (fun m -> m "connector err: %s" (Printexc.to_string exn))))
         (fun () ->
            Log.debug (fun m -> m "connector on [%s/%s] existed!" dev addr)))

@@ -85,7 +85,9 @@ module Make(Backend: Vnetif.BACKEND) = struct
        >>= fun key  -> Br_env.cm_key ()
        >>= fun key' -> if key = key' then ok () else error_msg "Unauthorized: CM key invalid")
       |> function
-      | Ok () -> handler req
+      | Ok () ->
+          Log.info (fun m -> m "pass CM authentication!");
+          handler req
       | Error (`Msg msg) -> respond' ~code:(`Code 401) (`String msg)
     in
     Opium_kernel.Rock.Middleware.create ~name ~filter

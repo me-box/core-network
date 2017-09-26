@@ -94,7 +94,7 @@ let send typ oc buf =
     | _ -> assert false
   in
   let hd = Cstruct.create sizeof_hd in
-  Cstruct.LE.set_uint16 hd 0 len;
+  Cstruct.BE.set_uint16 hd 0 len;
   Cstruct.set_uint8 hd 2 typ;
   Lwt_io.write oc (Cstruct.to_string @@ Cstruct.sub hd 0 sizeof_hd) >>= fun () ->
   Lwt_io.write oc (Cstruct.to_string buf) >>= fun () ->
@@ -104,11 +104,10 @@ let recv ic =
   let hd = Bytes.create sizeof_hd in
   Lwt_io.read_into_exactly ic hd 0 sizeof_hd >>= fun () ->
   let hd = Cstruct.of_bytes hd in
-  let len = Cstruct.LE.get_uint16 hd 0 in
+  let len = Cstruct.BE.get_uint16 hd 0 in
   let typ = Cstruct.get_uint8 hd 2 in
   let buf = Bytes.create len in
   Lwt_io.read_into_exactly ic buf 0 len >>= fun () ->
-
   (match typ with
   | 0 -> `PKT (Cstruct.of_bytes buf)
   | 1 -> `COMM (unmarshal_command (Cstruct.of_bytes buf))
@@ -165,7 +164,8 @@ module Client = struct
   let send_pkt (_, _, oc, _) buf = send `PKT oc buf
   let send_comm (_, _, oc, _) comm =
     let buf = Cstruct.create sizeof_command in
-    send `COMM oc (marshal_command comm buf)
+    let (_: Cstruct.t) = marshal_command comm buf in
+    send `COMM oc buf
 
   let recv_pkt (pkt_s, _, _, _) = Lwt_stream.next pkt_s
   let recv_comm (_, comm_s, _, _) = Lwt_stream.next comm_s
@@ -236,7 +236,8 @@ module Server = struct
   let send_pkt (_, _, oc) buf = send `PKT oc buf
   let send_comm (_, _, oc) comm =
     let buf = Cstruct.create sizeof_command in
-    send `COMM oc (marshal_command comm buf)
+    let (_: Cstruct.t) = marshal_command comm buf in
+    send `COMM oc buf
 
   let recv_pkt (pkt_s, _, _) = Lwt_stream.next pkt_s
   let recv_comm (_, comm_s, _) = Lwt_stream.next comm_s
