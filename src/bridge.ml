@@ -627,10 +627,38 @@ let async_exception () =
   Lwt.async_exception_hook := hook'
 
 
-let main path v =
-  Logs.set_reporter @@ Logs_fmt.reporter ();
-  Logs.set_level @@ if v then Some Debug else Some Info;
+type log_threshold = [`All | `Src of string] * Logs.level
 
+module Log_config = Mirage_logs.Make(Pclock)
+
+let set_up_logs logs =
+  let set_level ~default l =
+    let srcs = Logs.Src.list () in
+    let default =
+      try snd @@ List.find (function (`All, _) -> true | _ -> false) l
+      with Not_found -> default
+    in
+    Logs.set_level (Some default);
+    List.iter (function
+      | (`All, _) -> ()
+      | (`Src src, level) ->
+          try
+            let s = List.find (fun s -> Logs.Src.name s = src) srcs in
+            Logs.Src.set_level s (Some level)
+          with Not_found ->
+            Fmt.(pf stdout) "%a %s is not a valid log source.\n%!"
+              Fmt.(styled `Yellow string) "Warning:" src
+      ) l
+  in
+  Pclock.connect () >>= fun pclock ->
+  let reporter = Log_config.create pclock in
+  set_level ~default:Logs.Info logs;
+  Log_config.set_reporter reporter;
+  Lwt.return_unit
+
+
+let main path logs =
+  set_up_logs logs >>= fun () ->
   Proto.Server.bind path >>= fun server ->
   Local.create () >>= fun local ->
   let endpoints = Endpoints.create () in
@@ -665,17 +693,46 @@ let main path v =
 
 open Cmdliner
 
+let log_threshold =
+  let enum = [
+    "error"  , Logs.Error;
+    "warning", Logs.Warning;
+    "info"   , Logs.Info;
+    "debug"  , Logs.Debug;
+  ] in
+  let level_of_string x =
+    try List.assoc x enum
+    with Not_found -> Fmt.kstrf failwith "%s is not a valid log level" x
+  in
+  let string_of_level x =
+    try fst @@ List.find (fun (_, y) -> x = y) enum
+    with Not_found -> "warning"
+  in
+  let parser str =
+    match Astring.String.cut ~sep:":" str with
+    | None            -> `Ok (`All    , level_of_string str)
+    | Some ("*", str) -> `Ok (`All    , level_of_string str)
+    | Some (src, str) -> `Ok (`Src src, level_of_string str)
+  in
+  let serialize ppf = function
+  | `All  , l -> Fmt.string ppf (string_of_level l)
+  | `Src s, l -> Fmt.pf ppf "%s:%s" s (string_of_level l)
+  in
+  parser, serialize
+
+
 let usocket =
   let doc = "unix socket for the bridge to listen to" in
   Arg.(value & opt string "/var/tmp/bridge" & info ["s"; "socket"] ~doc ~docv:"SOCKET")
 
-let verbose =
-  let doc = "verbose logging" in
-  Arg.(value & flag & info ["v"] ~doc)
+
+let logs =
+  let doc = "set source-dependent logging level, eg: --logs *:info,foo:debug" in
+  Arg.(value & opt (list log_threshold) [] & info ["l"; "logs"] ~doc ~docv:"LEVEL")
 
 let cmd =
   let doc = "databox-bridge core component" in
-  Term.(const main $ usocket $ verbose),
+  Term.(const main $ usocket $ logs),
   Term.info "bridge" ~doc ~man:[]
 
 let () =
