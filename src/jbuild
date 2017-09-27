@@ -5,6 +5,6 @@
     (libraries (
      cstruct lwt lwt.unix logs logs.lwt logs.fmt cmdliner fpath bos
      ipaddr dns mirage-http mirage-conduit mirage-unix nocrypto.lwt mirage-logs
-     mirage-vnetif tcpip.ethif tcpip.arpv4 tcpip.ipv4 tcpip.icmpv4 tcpip.tcp tcpip.udp tcpip.stack-direct
+     mirage-net-unix mirage-vnetif tcpip.ethif tcpip.arpv4 tcpip.ipv4 tcpip.icmpv4 tcpip.tcp tcpip.udp tcpip.stack-direct
      opium_kernel))
     (preprocess no_preprocessing)))

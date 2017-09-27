@@ -1,9 +1,0 @@
-(jbuild_version 1)
-
-(executable
-  ((name driver)
-  (libraries
-    (lwt.unix lwt re re.posix bos fpath logs.lwt logs.fmt cmdliner
-     mirage-net-unix tcpip tcpip.ethif tcpip.arpv4 tcpip.ipv4 mirage-types-lwt
-     mirage-unix))
-  (preprocess no_preprocessing)))

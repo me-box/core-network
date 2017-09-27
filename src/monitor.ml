@@ -23,79 +23,6 @@ let intf_event l =
   with Not_found -> None
 
 
-let fill_config_tmpl config dev addr =
-  let open Bos.OS in
-  let open Rresult in
-  let open Re in
-  File.read config
-  >>| replace_string (str "%%DEVICE%%" |> compile) ~by:dev
-  >>| replace_string (str "%%ADDRESS%%" |> compile) ~by:addr
-
-
-let dir_of_dev dev = "connector_" ^ dev
-
-let create_connector dev addr =
-  let open Bos.OS in
-  let open Fpath in
-  (let open Rresult in
-    Dir.user ()
-   >>= fun user_path ->
-   let config_tmpl = user_path / "core-bridge" / "driver" / "config.ml.tmpl" in
-   fill_config_tmpl config_tmpl dev addr
-   >>| fun config_cont ->
-   let connector = user_path / "core-bridge" / "driver" / "connector" in
-   let target_connector = user_path / (dir_of_dev dev) in
-   let cp = "cp", [|"cp"; "-R"; Fpath.to_string connector; Fpath.to_string target_connector|] in
-   Lwt.bind (Lwt_process.exec cp) (fun _ ->
-       let config = target_connector / "config.ml" in
-       File.write config config_cont
-       |> function
-       | Ok () -> Lwt.return_unit
-       | Error msg -> Log.err (fun m -> m "write config.ml: %a" R.pp_msg msg)))
-  |> function
-  | Ok t -> Log.debug (fun m -> m "connector for %s %s created!" dev addr) >>= fun () -> t
-  | Error msg -> Log.err (fun m -> m "create_connector: %a" Rresult.R.pp_msg msg)
-
-
-let fill_start_tmpl start path dev addr =
-  let open Bos.OS in
-  let open Rresult in
-  let path = Fpath.to_string path in
-  File.read start
-  >>| Re.replace_string (Re.str "%%PATH%%" |> Re.compile) ~by:path
-  >>| Re.replace_string (Re.str "%%DEVICE%%" |> Re.compile) ~by:dev
-  >>| Re.replace_string (Re.str "%%ADDRESS%%" |> Re.compile) ~by:addr
-
-
-let start_connector dev addr =
-  let open Bos.OS in
-  let open Fpath in
-  let open Lwt_result.Infix in
-  Lwt_result.ok @@ Log.debug (fun m -> m "starting connector for %s %s..." dev addr)
-  >>= fun () ->
-  Lwt.return @@ Dir.user ()
-  >>= fun user_path ->
-  let connector = user_path / (dir_of_dev dev) in
-  let start = user_path / "core-bridge" / "driver" / "start.sh.tmpl" in
-  Lwt.return @@ fill_start_tmpl start connector dev addr
-  >>= fun start ->
-  let target_start = connector / "start.sh" in
-  Lwt.return @@ File.write target_start start
-  >>= fun () ->
-  let sh = "sh", [|"sh"; Fpath.to_string target_start|] in
-  Lwt_result.ok @@ Lwt_process.exec sh
-
-
-let remove_connector dev =
-  let module Dir = Bos.OS.Dir in
-  let open Fpath in
-  let open Rresult in
-  (Dir.user () >>= fun user_path ->
-   let connector = user_path / (dir_of_dev dev) in
-   Dir.delete ~recurse:true connector)
-  |> fun _ -> Log.debug (fun m -> m "housekeeping for %s finished!" dev)
-
-
 let existed_intf t =
   let command = "ip", [|"ip"; "address"; "show"|] in
   let st = Lwt_process.pread_lines command in
@@ -120,10 +47,7 @@ let existed_intf t =
 
 
 
-let  monitor v () =
-  Logs.set_reporter (Logs_fmt.reporter ());
-  Logs.(set_level @@ if v then Some Debug else Some Info);
-
+let start () =
   (* (ip, interface name) Hashtbl.t *)
   let connectors = Hashtbl.create 7 in
 
@@ -160,21 +84,3 @@ let  monitor v () =
   existed_intf connectors >>= fun () ->
   Log.info (fun m -> m "start monitoring for phy intf event...") >>= fun () ->
   m ()
-
-
-open Cmdliner
-
-let verbose =
-  let doc = "verbose logging" in
-  Arg.(value & flag & info ["v"] ~doc)
-
-let cmd =
-  let doc = "databox-bridge driver to start interface connectors" in
-  Term.(const monitor $ verbose $ const ()),
-  Term.info "connector-driver" ~doc ~man:[]
-
-
-let () =
-  match Term.eval cmd with
-  | `Ok t -> Lwt_main.run t
-  | _ -> exit 1

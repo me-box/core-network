@@ -29,6 +29,6 @@ setup.data
 setup.log
 
 exp
-driver/connector
+driver
 *.merlin
 test

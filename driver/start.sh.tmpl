@@ -1,9 +1,0 @@
-#!/bin/sh
-
-set -ex
-
-cd %%PATH%%
-eval `opam config env`
-mirage configure -t unix
-make
-sudo ./connector --dev %%DEVICE%% --intf %%ADDRESS%% &

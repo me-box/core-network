@@ -133,7 +133,7 @@ module NAT = struct
     t.translation <- PairMap.add px py t.translation;
     let handle = fst px, snd py in
     t.rule_handles <- PairMap.add handle px t.rule_handles;
-    Log.info (fun m -> m "new NAT rule: (%a -> %a) => (%a -> %a)"
+    Log.debug (fun m -> m "new NAT rule: (%a -> %a) => (%a -> %a)"
                  pp_ip (fst px) pp_ip (snd px) pp_ip (fst py) pp_ip (snd py))
 
 
@@ -276,7 +276,7 @@ module Endpoints = struct
   let _req_id = ref 0l
   let req_id () =
     let id = !_req_id in
-    _req_id := Int32.pred id;
+    _req_id := Int32.succ id;
     id
 
   let claim_fake_dst t ip =
@@ -289,7 +289,7 @@ module Endpoints = struct
         let id = req_id () in
         let comm = Proto.IP_REQ id in
         let conn = EndpMap.find endp t.connections in
-        Log.info (fun m -> m "IP_REQ %ld on %s(%a) for %a" id endp.interface pp_ip endp.ip_addr pp_ip ip) >>= fun () ->
+        Log.debug (fun m -> m "IP_REQ %ld on %s(%a) for %a" id endp.interface pp_ip endp.ip_addr pp_ip ip) >>= fun () ->
         enqueue_req t id u >>= fun () ->
         Proto.Server.send_comm conn comm >>= fun () ->
         fake
@@ -344,7 +344,7 @@ module Policy = struct
       let names' = (name, dst_ip) :: (List.remove_assoc name names) in
       t.resolve <- IpMap.add src_ip names' t.resolve
     else t.resolve <- IpMap.add src_ip [name, dst_ip] t.resolve;
-    Log.info (fun m -> m "allow %a to resolve %s (as %a)" pp_ip src_ip name pp_ip dst_ip)
+    Log.debug (fun m -> m "allow %a to resolve %s (as %a)" pp_ip src_ip name pp_ip dst_ip)
 
 
   let allow_transport t src_ip dst_ip =
@@ -525,7 +525,6 @@ module Dispatcher = struct
   let dispatcher_mac = Macaddr.make_local (fun x -> x + 1)
 
   let dispatch t endp (buf, pkt) =
-    Log.info (fun m -> m "in dispatch %s(%d)" (Frame.fr_info pkt) (Cstruct.len buf)) >>= fun () ->
     let src_ip, dst_ip = let open Frame in match pkt with
       | Ipv4 {src; dst; _} -> src, dst
       | _ ->
@@ -599,7 +598,7 @@ let rec from_endpoint conn push_in =
   (*hexdump_buf_debug "from_endpoint" buf >>= fun () ->*)
   Frame.parse_ipv4_pkt buf |> function
   | Ok fr ->
-      Log.info (fun m -> m "parse_ipv4_pkt: %s" (Frame.fr_info fr)) >>= fun () ->
+      Log.debug (fun m -> m "parse_ipv4_pkt: %s" (Frame.fr_info fr)) >>= fun () ->
       push_in @@ Some (buf, fr);
       from_endpoint conn push_in
   | Error (`Msg msg) ->
@@ -660,6 +659,7 @@ let set_up_logs logs =
 let main path logs =
   set_up_logs logs >>= fun () ->
   Proto.Server.bind path >>= fun server ->
+
   Local.create () >>= fun local ->
   let endpoints = Endpoints.create () in
   let nat = NAT.create () in
@@ -688,7 +688,11 @@ let main path logs =
 
   Dispatcher.set_local_listener disp;
   Proto.Server.listen server serve_endp >>= fun () ->
-  Local.start_service local policy ()
+
+  Lwt.choose [
+    Local.start_service local policy ();
+    Monitor.start();
+  ]
 
 
 open Cmdliner
