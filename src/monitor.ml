@@ -1,8 +1,7 @@
 open Lwt.Infix
 
-
-let driver = Logs.Src.create "driver" ~doc:"Connector driver"
-module Log = (val Logs_lwt.src_log driver : Logs_lwt.LOG)
+let monitor = Logs.Src.create "monitor" ~doc:"Connector monitor"
+module Log = (val Logs_lwt.src_log monitor : Logs_lwt.LOG)
 
 let intf_event l =
   let open Re in
