@@ -1,19 +1,27 @@
-FROM alpine:3.5
+#FROM databoxsystems/base-image-ocaml:alpine-3.4_ocaml-4.04.2 as BUILDER
+FROM ocaml/opam:alpine-3.6_ocaml-4.04.2 as BUILDER
 
-RUN apk update && apk upgrade &&\
-    apk add sudo &&\
-    adduser -S mebox &&\
-    echo 'mebox ALL=(ALL:ALL) NOPASSWD:ALL' > /etc/sudoers.d/mebox &&\
-    chmod 440 /etc/sudoers.d/mebox &&\
-    chown root:root /etc/sudoers.d/mebox &&\
-    sed -i.bak 's/^Defaults.*requiretty//g' /etc/sudoers
+WORKDIR /core-bridge
+ADD bridge.export bridge.export
 
-USER mebox
-WORKDIR /home/mebox
+RUN sudo apk update && sudo apk add alpine-sdk bash gmp-dev perl autoconf linux-headers &&\
+    opam remote add git https://github.com/ocaml/opam-repository.git &&\
+    opam pin add -n mirage-net-unix https://github.com/sevenEng/mirage-net-psock.git &&\
+    opam switch import bridge.export
 
-ADD . core-bridge
+ADD . .
+RUN sudo chown opam: -R src && cd src && opam config exec -- jbuilder build bridge.exe
 
-RUN sudo apk add opam bash
-RUN cd core-bridge && ./install.sh
 
-CMD ["bash", "/home/mebox/core-bridge/start.sh"]
+FROM alpine:3.6
+
+WORKDIR /core-bridge
+ADD start.sh start.sh
+RUN apk update && apk add bash gmp-dev iptables iproute2
+COPY --from=BUILDER /core-bridge/src/_build/default/bridge.exe bridge
+
+EXPOSE 8080
+
+LABEL databox.type="bridge"
+
+CMD ["./start.sh"]
