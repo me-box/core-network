@@ -21,13 +21,3 @@ let https_creds () =
   let cert_file  = Fpath.add_seg secrets_dir "DATABOX_BRIDGE.pem" in
   let key_file   = Fpath.add_seg secrets_dir "DATABOX_BRIDGE.pem" in
   Rresult.R.ok (cert_file, key_file)
-
-
-let system_network = ref None
-let system_network () =
-  if None <> !system_network then !system_network
-  else try
-    let n = Ipaddr.V4.Prefix.of_address_string_exn @@ Sys.getenv "DATABOX_SYSNET" in
-    system_network := Some n;
-    !system_network
-  with _ -> None

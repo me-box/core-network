@@ -435,7 +435,60 @@ module Local = struct
     network: Ipaddr.V4.Prefix.t;
   }
 
-  let create () =
+  let lock = Lwt_mutex.create ()
+  let instance = ref None
+
+  let is_to_local ip =
+    match !instance with
+    | None -> false
+    | Some {network} -> Ipaddr.V4.Prefix.mem ip network
+
+
+  let local_virtual_mac = Macaddr.make_local (fun x -> x + 1)
+  let write_to_service ethertype pkt =
+    match !instance with
+    | None -> Log.err (fun m -> m "Local service not initialized!")
+    | Some t ->
+        let open Ethif_packet in
+        let source = local_virtual_mac in
+        let destination = Service.mac t.service in
+        let hd = {source; destination; ethertype} in
+        let hd = Marshal.make_cstruct hd in
+        let fr = Cstruct.append hd pkt in
+        Backend.write t.backend t.id fr >>= function
+        | Ok () -> Lwt.return_unit
+        | Error err ->
+            Log.err (fun m -> m "write_to_service err: %a" Mirage_net.pp_error err)
+            >>= Lwt.return
+
+  (*from local stack in Server*)
+  let set_local_listener t endpoints =
+    let open Frame in
+    let listener buf =
+      Lwt.catch (fun () ->
+      match parse buf with
+      | Ok (Ethernet {dst = dst_mac; payload = (Ipv4 {dst = dst_ip} as pkt)})
+        when 0 = Macaddr.compare dst_mac local_virtual_mac ->
+          let pkt_raw = Cstruct.shift buf Ethif_wire.sizeof_ethernet in
+          Endpoints.to_push endpoints dst_ip (pkt_raw, pkt)
+      | Ok (Ethernet {src = tha; payload = Arp {op = `Request; spa = tpa; tpa = spa}}) ->
+          let arp_resp =
+            let open Arpv4_packet in
+            let t = {op = Arpv4_wire.Reply; sha = local_virtual_mac; spa; tha; tpa} in
+            Marshal.make_cstruct t
+          in
+          write_to_service Ethif_wire.ARP arp_resp
+      | Ok fr ->
+          Log.warn (fun m -> m "not ipv4 or arp request: %s, dropped" (fr_info fr))
+      | Error (`Msg msg) ->
+          Log.err (fun m -> m "parse pkt from local err: %s" msg))
+        (fun e -> Log.err (fun m -> m "set_local_listener: %s\n%s" (Printexc.to_string e) (Printexc.get_backtrace ()))
+        >>= fun () -> Lwt.fail e)
+    in
+    Backend.set_listen_fn t.backend t.id listener
+
+
+  let create endp endpoints =
     let yield = Lwt_main.yield in
     let use_async_readers = true in
     let backend = Backend.create ~yield ~use_async_readers () in
@@ -446,29 +499,19 @@ module Local = struct
           Log.err (fun m -> m "Backend.register err: %a" Mirage_net.pp_error err)
           |> Lwt.ignore_result; -1
     in
-    let network, address =
-      match Br_env.system_network () with
-      | Some (n, a) -> n, a
-      | None ->
-          Lwt.ignore_result @@ Log.err (fun m -> m "required ENV for local address!");
-          assert false in
+    let address = endp.Proto.ip_addr in
+    let network = Ipaddr.V4.Prefix.make endp.Proto.netmask address in
     Service.make backend address >>= fun service ->
-    Lwt.return {id; backend; service; network; address}
+    let t = {id; backend; service; network; address} in
+    set_local_listener t endpoints;
+    instance := Some t;
+    Lwt.return_unit
 
-  let is_to_local {network} ip =
-    Ipaddr.V4.Prefix.mem ip network
-
-  let write_to_service t source ethertype pkt =
-    let open Ethif_packet in
-    let destination = Service.mac t.service in
-    let hd = {source; destination; ethertype} in
-    let hd = Marshal.make_cstruct hd in
-    let fr = Cstruct.append hd pkt in
-    Backend.write t.backend t.id fr >>= function
-    | Ok () -> Lwt.return_unit
-    | Error err ->
-        Log.err (fun m -> m "write_to_service err: %a" Mirage_net.pp_error err)
-        >>= Lwt.return
+  let initialize_if_not endp endpoints =
+    Lwt_mutex.with_lock lock (fun () ->
+        match !instance with
+        | None -> create endp endpoints
+        | Some _ -> Lwt.return_unit)
 
 
   open Service
@@ -518,12 +561,9 @@ module Dispatcher = struct
 
   type t = {
     endpoints: Endpoints.t;
-    local: Local.t;
     policy: Policy.t;
     nat: NAT.t;
   }
-
-  let dispatcher_mac = Macaddr.make_local (fun x -> x + 1)
 
   let dispatch t endp (buf, pkt) =
     let src_ip, dst_ip = let open Frame in match pkt with
@@ -532,65 +572,24 @@ module Dispatcher = struct
           Log.err (fun m -> m "Dispathcer: dispatch %s" (Frame.fr_info pkt)) |> Lwt.ignore_result;
           assert false in
     if Dns_service.is_dns_query pkt then
-      Log.info (fun m -> m "Dispatcher: a dns query from %a" pp_ip src_ip) >>= fun () ->
+      Log.debug (fun m -> m "Dispatcher: a dns query from %a" pp_ip src_ip) >>= fun () ->
       let resolve = Policy.is_authorized_resolve t.policy src_ip in
       Dns_service.process_dns_query ~resolve pkt >>= fun resp ->
       let resp = Dns_service.to_dns_response t pkt resp in
       Endpoints.to_push t.endpoints dst_ip resp
-    else if Local.is_to_local t.local dst_ip then
+    else if Local.is_to_local dst_ip then
       Log.debug (fun m -> m "Dispatcher: allowed pkt[local] %a -> %a" pp_ip src_ip pp_ip dst_ip) >>= fun () ->
-      Local.write_to_service t.local dispatcher_mac Ethif_wire.IPv4 buf
+      Local.write_to_service Ethif_wire.IPv4 buf
     else if Policy.is_authorized_transport t.policy src_ip dst_ip then
       Log.debug (fun m -> m "Dispatcher: allowed pkt %a -> %a" pp_ip src_ip pp_ip dst_ip) >>= fun () ->
       NAT.translate t.nat (src_ip, dst_ip) (buf, pkt) >>= fun (nat_src_ip, nat_dst_ip, nat_buf, nat_pkt) ->
-      Log.info (fun m -> m "Dispatcher: after NAT %a -> %a" pp_ip nat_src_ip pp_ip nat_dst_ip) >>= fun () ->
+      Log.debug (fun m -> m "Dispatcher: after NAT %a -> %a" pp_ip nat_src_ip pp_ip nat_dst_ip) >>= fun () ->
       Endpoints.to_push t.endpoints nat_dst_ip (nat_buf, nat_pkt)
     else Log.warn (fun m -> m "Dispatcher: dropped pkt %a -> %a" pp_ip src_ip pp_ip dst_ip)
 
-(*
-  let register_endpoint t endp in_s =
-    if not @@ EndpMap.mem endp t.endpoints then
-      t.endpoints <- EndpMap.add endp (in_s, push_out) t.endpoints;
-    let rec drain_pkt () =
-      Lwt_stream.get in_s >>= function
-      | Some (buf, pkt) ->
-          dispatch t endp (buf, pkt) >>= fun () ->
-          drain_pkt ()
-      | None ->
-          Log.warn (fun m -> m "endpoint %s closed?!" @@ Proto.endp_to_string endp)
-    in
-    Lwt.return drain_pkt*)
 
-
-  (*from local stack in Server*)
-  let set_local_listener t =
-    let open Frame in
-    let listener buf =
-      Lwt.catch (fun () ->
-          (*hexdump_buf_debug "local listener" buf >>= fun () ->*)
-      match parse buf with
-      | Ok (Ethernet {dst = dst_mac; payload = (Ipv4 {dst = dst_ip} as pkt)})
-        when 0 = Macaddr.compare dst_mac dispatcher_mac ->
-          let pkt_raw = Cstruct.shift buf Ethif_wire.sizeof_ethernet in
-          Endpoints.to_push t.endpoints dst_ip (pkt_raw, pkt)
-      | Ok (Ethernet {src = tha; payload = Arp {op = `Request; spa = tpa; tpa = spa}}) ->
-          let arp_resp =
-            let open Arpv4_packet in
-            let t = {op = Arpv4_wire.Reply; sha = dispatcher_mac; spa; tha; tpa} in
-            Marshal.make_cstruct t
-          in
-          Local.write_to_service t.local dispatcher_mac Ethif_wire.ARP arp_resp
-      | Ok fr ->
-          Log.warn (fun m -> m "not ipv4 or arp request: %s, dropped" (fr_info fr))
-      | Error (`Msg msg) ->
-          Log.err (fun m -> m "parse pkt from local err: %s" msg))
-        (fun e -> Log.err (fun m -> m "set_local_listener: %s\n%s" (Printexc.to_string e) (Printexc.get_backtrace ()))
-        >>= fun () -> Lwt.fail e)
-    in
-    Local.Backend.set_listen_fn t.local.backend t.local.id listener
-
-  let create local policy endpoints nat =
-    {endpoints; local; policy; nat}
+  let create endpoints policy nat =
+    {endpoints; policy; nat}
 end
 
 
@@ -631,12 +630,12 @@ let main path logs =
   Utils.set_up_logs logs >>= fun () ->
   Proto.Server.bind path >>= fun server ->
 
-  Local.create () >>= fun local ->
   let endpoints = Endpoints.create () in
   let nat = NAT.create () in
   let policy = Policy.create endpoints nat () in
-  let disp = Dispatcher.create local policy endpoints nat in
+  let disp = Dispatcher.create endpoints policy nat in
   let serve_endp endp conn =
+    let () = Lwt.async (fun () -> Local.initialize_if_not endp endpoints) in
     let in_s, push_in = Lwt_stream.create () in
     let out_s, push_out = Lwt_stream.create () in
     Log.info (fun m -> m "client %s made connection!" @@ Proto.endp_to_string endp) >>= fun () ->
@@ -657,13 +656,8 @@ let main path logs =
     ]
   in
 
-  Dispatcher.set_local_listener disp;
   Proto.Server.listen server serve_endp >>= fun () ->
-
-  Lwt.choose [
-    Local.start_service local policy ();
-    Monitor.start();
-  ]
+  Monitor.start()
 
 
 open Cmdliner
