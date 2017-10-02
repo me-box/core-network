@@ -535,15 +535,21 @@ module Local = struct
 
   let allow_route po =
     let allow_handler = fun req ->
-      json_of_body_exn req >>= fun obj ->
-      Ezjsonm.(get_pair get_string get_string @@ value obj)
-      |> fun (x, y) ->
       Lwt.catch (fun () ->
-          Policy.allow_pair po x y >>= fun () ->
+          json_of_body_exn req >>= fun obj ->
+          (try
+            let open Ezjsonm in
+            let dict = get_dict (value obj) in
+            let name = List.assoc "name" dict |> get_string in
+            let peers = List.assoc "peers" dict |> get_list get_string in
+            Lwt.return (name, peers)
+          with exn -> Lwt.fail exn)
+          >>= fun (name, peers) ->
+          Lwt_list.map_p (fun peer -> Policy.allow_pair po name peer) peers >>= fun _ ->
           let status = Cohttp.Code.(`OK) in
           Lwt.return (status, `Json (`O [])))
         (fun e ->
-           let msg = Printf.sprintf "Policy.allow_pair %s %s: %s" x y (Printexc.to_string e) in
+           let msg = Printf.sprintf "error when try /connect: %s" (Printexc.to_string e) in
            let status = Cohttp.Code.(`Code 500) in
            Lwt.return (status, `String msg)) >>= fun (code, body) ->
       respond' ~code body
