@@ -18,8 +18,11 @@ module Make(N: NETWORK)(E: ETHIF)(Arp: ARP)(Ip: IPV4) = struct
     mutex: Lwt_mutex.t;
   }
 
-  let _free_ip_cnt = 2
-  let _detect_duplicates_sleep = 30. (* ms *)
+  let _free_ip_cnt = 5
+  let _detect_duplicates_sleep = 30. (* s *)
+  let _interface = ref ""
+
+  let pp_ip = Ipaddr.V4.pp_hum
 
   let count_free ipp =
     Lwt_mutex.with_lock ipp.mutex (fun () ->
@@ -27,15 +30,18 @@ module Make(N: NETWORK)(E: ETHIF)(Arp: ARP)(Ip: IPV4) = struct
 
   let put_ip ipp ip =
     Lwt_mutex.with_lock ipp.mutex (fun () ->
-        ipp.free_ips <- ip :: ipp.free_ips;
-        Lwt.return_unit)
+        if not @@ List.mem ip ipp.free_ips then ipp.free_ips <- ip :: ipp.free_ips;
+        Lwt.return_unit) >>= fun () ->
+    Log.info (fun m -> m "%s got free ip %a" !_interface pp_ip ip)
 
   let use_ip ipp () =
     Lwt_mutex.with_lock ipp.mutex (fun () ->
         let ip = List.hd ipp.free_ips in
         ipp.free_ips <- (List.tl ipp.free_ips);
         ipp.used_ips <- ip :: ipp.used_ips;
-        Lwt.return ip)
+        Lwt.return ip) >>= fun ip ->
+    Log.info (fun m -> m "%s used ip %a" !_interface pp_ip ip) >>= fun () ->
+    Lwt.return ip
 
 
   let delete_duplicated ~delete_used ip ipp cond =
@@ -199,6 +205,7 @@ module Make(N: NETWORK)(E: ETHIF)(Arp: ARP)(Ip: IPV4) = struct
 
 
   let start ?(socket_path="/var/tmp/bridge") nf eth arp ip endp =
+    let () = _interface := endp.Proto.interface in
     Proto.Client.connect socket_path endp >>= function
     | Ok conn ->
         Lwt.pick [

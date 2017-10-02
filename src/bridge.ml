@@ -134,7 +134,7 @@ module NAT = struct
     t.translation <- PairMap.add px py t.translation;
     let handle = fst px, snd py in
     t.rule_handles <- PairMap.add handle px t.rule_handles;
-    Log.debug (fun m -> m "new NAT rule: (%a -> %a) => (%a -> %a)"
+    Log.info (fun m -> m "new NAT rule: (%a -> %a) => (%a -> %a)"
                  pp_ip (fst px) pp_ip (snd px) pp_ip (fst py) pp_ip (snd py))
 
 
@@ -354,7 +354,7 @@ module Policy = struct
       let names' = (name, dst_ip) :: (List.remove_assoc name names) in
       t.resolve <- IpMap.add src_ip names' t.resolve
     else t.resolve <- IpMap.add src_ip [name, dst_ip] t.resolve;
-    Log.debug (fun m -> m "allow %a to resolve %s (as %a)" pp_ip src_ip name pp_ip dst_ip)
+    Log.info (fun m -> m "allow %a to resolve %s (as %a)" pp_ip src_ip name pp_ip dst_ip)
 
 
   let allow_transport t src_ip dst_ip =
@@ -693,9 +693,9 @@ let usocket =
 let logs =
   let doc = "set source-dependent logging level, eg: --logs *:info,foo:debug" in
   let src_levels = [
-    `Src "bridge",    Logs.Debug;
-    `Src "monitor",   Logs.Debug;
-    `Src "connector", Logs.Debug;] in
+    `Src "bridge",    Logs.Info;
+    `Src "monitor",   Logs.Info;
+    `Src "connector", Logs.Info;] in
   Arg.(value & opt (list Utils.log_threshold) src_levels & info ["l"; "logs"] ~doc ~docv:"LEVEL")
 
 let cmd =
