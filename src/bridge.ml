@@ -226,7 +226,7 @@ module Endpoints = struct
     mutex: Lwt_mutex.t;
   }
 
-  let endp_to_push t dst =
+  let endp_of_ip t dst =
     Lwt_mutex.with_lock t.mutex (fun () ->
         (if IpMap.mem dst t.push_cache then Some (IpMap.find dst t.push_cache) else
          EndpSet.fold (fun endp acc ->
@@ -241,8 +241,17 @@ module Endpoints = struct
         |> Lwt.return)
 
 
+  let from_same_network t ipx ipy =
+    endp_of_ip t ipx >>= fun endpx ->
+    endp_of_ip t ipy >>= fun endpy ->
+    match endpx, endpy with
+    | Some endpx, Some endpy ->
+        Lwt.return (endpx.Proto.interface = endpy.Proto.interface)
+    | _ ->
+        Lwt.return false
+
   let to_push t dst dg =
-    endp_to_push t dst >>= function
+    endp_of_ip t dst >>= function
     | None ->
         Log.warn (fun m -> m "no endp to push for %a, drop" pp_ip dst)
     | Some endp ->
@@ -282,7 +291,7 @@ module Endpoints = struct
 
   let claim_fake_dst t ip =
     let fake, u = Lwt.wait () in
-    endp_to_push t ip >>= function
+    endp_of_ip t ip >>= function
     | None ->
         Log.err (fun m -> m "no endp to fake dst for %a" pp_ip ip) >>= fun () ->
         Lwt.fail_with "claim_fake_dst"
@@ -370,19 +379,27 @@ module Policy = struct
     Lwt_list.map_s Dns_service.ip_of_name [nx; ny] >>= fun ips ->
     let ipx = List.hd ips
     and ipy = List.hd @@ List.tl ips in
-    (* dns request from ipx for ny should return ipy' *)
-    (* dns request from ipy for nx should return ipx' *)
-    Endpoints.claim_fake_dst t.endpoints ipx >>= fun ipy' ->
-    Endpoints.claim_fake_dst t.endpoints ipy >>= fun ipx' ->
-    allow_resolve t ipx ny ipy' >>= fun () ->
-    allow_resolve t ipy nx ipx' >>= fun () ->
-    (* NAT: ipx -> ipy' => ipx' -> ipy *)
-    (* NAT: ipy -> ipx' => ipy' -> ipx *)
-    allow_transport t ipx ipy' >>= fun () ->
-    allow_transport t ipy ipx' >>= fun () ->
-    NAT.add_rule t.nat (ipx, ipy') (ipx', ipy) >>= fun () ->
-    NAT.add_rule t.nat (ipy, ipx') (ipy', ipx) >>= fun () ->
-    Lwt.return_unit
+    Endpoints.from_same_network t.endpoints ipx ipy >>= function
+    | false ->
+        (* dns request from ipx for ny should return ipy' *)
+        (* dns request from ipy for nx should return ipx' *)
+        Endpoints.claim_fake_dst t.endpoints ipx >>= fun ipy' ->
+        Endpoints.claim_fake_dst t.endpoints ipy >>= fun ipx' ->
+        allow_resolve t ipx ny ipy' >>= fun () ->
+        allow_resolve t ipy nx ipx' >>= fun () ->
+        (* NAT: ipx -> ipy' => ipx' -> ipy *)
+        (* NAT: ipy -> ipx' => ipy' -> ipx *)
+        allow_transport t ipx ipy' >>= fun () ->
+        allow_transport t ipy ipx' >>= fun () ->
+        NAT.add_rule t.nat (ipx, ipy') (ipx', ipy) >>= fun () ->
+        NAT.add_rule t.nat (ipy, ipx') (ipy', ipx) >>= fun () ->
+        Lwt.return_unit
+    | true ->
+        (* nx ny are in the same network *)
+        (* DNS returns true IP directly, no NAT, no transport *)
+        allow_resolve t ipx ny ipy >>= fun () ->
+        allow_resolve t ipy nx ipx >>= fun () ->
+        Lwt.return_unit
 
 
   let allow_pair t nx ny =
