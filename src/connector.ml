@@ -84,7 +84,7 @@ module Make(N: NETWORK)(E: ETHIF)(Arp: ARP)(Ip: IPV4) = struct
       Ipaddr.V4.Prefix.network prefix in
     let last_added =
       let net = Ipaddr.V4.to_int32 network in
-      ref (Int32.(add net (shift_left one netmask |> pred))) in
+      ref (Int32.(add net (shift_left one (32 - netmask) |> pred))) in
     let next () =
       let next = Int32.(sub !last_added one) in
       last_added := next;
