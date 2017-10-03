@@ -332,7 +332,7 @@ end
 
 module Policy = struct
 
-  module PairSet = Set.Make(struct
+  module IPPairSet = Set.Make(struct
       type t = pair
       let compare (xx, xy) (yx, yy) =
         let open Ipaddr.V4 in
@@ -340,12 +340,24 @@ module Policy = struct
         else compare xx yy
     end)
 
+  module DomainPairSet = Set.Make(struct
+      type t = string * string
+      let compare (xx, xy) (yx, yy) =
+        if (xx = yx && xy = yy) || (xx = yy && xy = yx) then 0
+        else Pervasives.compare (xx, xy) (yx, yy)
+    end)
+
   type t = {
-    mutable transport: PairSet.t;
+    mutable pairs : DomainPairSet.t;
+    mutable transport: IPPairSet.t;
     mutable resolve: (string * Ipaddr.V4.t) list IpMap.t;
     endpoints: Endpoints.t;
     nat: NAT.t;
   }
+
+  let add_pair t nx ny =
+    t.pairs <- DomainPairSet.add (nx, ny) t.pairs;
+    Lwt.return_unit
 
   let allow_resolve t src_ip name dst_ip =
     if IpMap.mem src_ip t.resolve
@@ -356,10 +368,10 @@ module Policy = struct
     else t.resolve <- IpMap.add src_ip [name, dst_ip] t.resolve;
     Log.info (fun m -> m "allow %a to resolve %s (as %a)" pp_ip src_ip name pp_ip dst_ip)
 
-
   let allow_transport t src_ip dst_ip =
-    t.transport <- PairSet.add (src_ip, dst_ip) t.transport;
+    t.transport <- IPPairSet.add (src_ip, dst_ip) t.transport;
     Lwt.return_unit
+
 
   let forbidden_resolve t src_ip name =
     if IpMap.mem src_ip t.resolve
@@ -371,16 +383,21 @@ module Policy = struct
     else Lwt.return_unit
 
   let forbidden_transport t src_ip dst_ip =
-    t.transport <- PairSet.remove (src_ip, dst_ip) t.transport;
+    t.transport <- IPPairSet.remove (src_ip, dst_ip) t.transport;
     Lwt.return_unit
 
+  let remove_pair t nx ny =
+    t.pairs <- DomainPairSet.remove (nx, ny) t.pairs;
+    Lwt.return_unit
 
   let process_allowed_pair t nx ny =
+    if DomainPairSet.mem (nx, ny) t.pairs then Lwt.return_unit else
     Lwt_list.map_s Dns_service.ip_of_name [nx; ny] >>= fun ips ->
     let ipx = List.hd ips
     and ipy = List.hd @@ List.tl ips in
     Endpoints.from_same_network t.endpoints ipx ipy >>= function
     | false ->
+        add_pair t nx ny >>= fun () ->
         (* dns request from ipx for ny should return ipy' *)
         (* dns request from ipy for nx should return ipx' *)
         Endpoints.claim_fake_dst t.endpoints ipx >>= fun ipy' ->
@@ -410,6 +427,7 @@ module Policy = struct
 
 
   let forbidden_pair t nx ny =
+    remove_pair t nx ny >>= fun () ->
     Dns_service.ip_of_name nx >>= fun ipx ->
     Dns_service.ip_of_name ny >>= fun ipy ->
     forbidden_resolve t ipx ny >>= fun () ->
@@ -422,7 +440,7 @@ module Policy = struct
 
 
   let is_authorized_transport {transport; _} ipx ipy =
-    PairSet.mem (ipx, ipy) transport
+    IPPairSet.mem (ipx, ipy) transport
 
   let is_authorized_resolve t ip name =
     if IpMap.mem ip t.resolve then
@@ -433,9 +451,10 @@ module Policy = struct
 
 
   let create endpoints nat () =
-    let transport = PairSet.empty in
+    let pairs = DomainPairSet.empty in
+    let transport = IPPairSet.empty in
     let resolve = IpMap.empty in
-    {transport; resolve; endpoints; nat}
+    {pairs; transport; resolve; endpoints; nat}
 end
 
 
