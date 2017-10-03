@@ -6,8 +6,8 @@ let cm_key () =
   if !cm_key <> "" then Rresult.R.ok !cm_key
   else begin
     let key_file = Fpath.add_seg secrets_dir "CM_KEY" in
-    let decode file = B64.decode (String.trim file) in
-    Rresult.R.map decode (Bos.OS.File.read key_file)
+    let get_key file = B64.encode (String.trim file) in
+    Rresult.R.map get_key (Bos.OS.File.read key_file)
     |> function
     | Ok key ->
         cm_key := key;
