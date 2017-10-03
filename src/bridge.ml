@@ -541,13 +541,7 @@ module Local = struct
     let t = {id; backend; service; network; address} in
     set_local_listener t endpoints;
     instance := Some t;
-    Lwt.return_unit
-
-  let initialize_if_not endp endpoints =
-    Lwt_mutex.with_lock lock (fun () ->
-        match !instance with
-        | None -> create endp endpoints
-        | Some _ -> Lwt.return_unit)
+    Lwt.return t
 
 
   open Service
@@ -596,6 +590,15 @@ module Local = struct
   let start_service t po =
     let callback = callback_of_routes [allow_route po; forbidden_route po] in
     start t.service ~callback
+
+
+  let initialize_if_not endp policy endpoints =
+    Lwt_mutex.with_lock lock (fun () ->
+        match !instance with
+        | None ->
+            create endp endpoints >>= fun t ->
+            start_service t policy ()
+        | Some _ -> Lwt.return_unit)
 end
 
 
@@ -677,7 +680,7 @@ let main path logs =
   let policy = Policy.create endpoints nat () in
   let disp = Dispatcher.create endpoints policy nat in
   let serve_endp endp conn =
-    let () = Lwt.async (fun () -> Local.initialize_if_not endp endpoints) in
+    let () = Lwt.async (fun () -> Local.initialize_if_not endp policy endpoints) in
     let in_s, push_in = Lwt_stream.create () in
     let out_s, push_out = Lwt_stream.create () in
     Log.info (fun m -> m "client %s made connection!" @@ Proto.endp_to_string endp) >>= fun () ->
