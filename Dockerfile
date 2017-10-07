@@ -6,7 +6,7 @@ ADD bridge.export bridge.export
 
 RUN sudo apk update && sudo apk add alpine-sdk bash gmp-dev perl autoconf linux-headers &&\
     opam remote add git https://github.com/ocaml/opam-repository.git &&\
-    opam pin add -n mirage-net-unix https://github.com/sevenEng/mirage-net-psock.git &&\
+    opam pin add -n mirage-net-psock.0.1.0 https://github.com/sevenEng/mirage-net-psock.git &&\
     opam switch import bridge.export
 
 ADD . .

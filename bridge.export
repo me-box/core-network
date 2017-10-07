@@ -65,7 +65,7 @@ mirage-kv-lwt	1.1.0	installed
 mirage-logs	0.3.0	root
 mirage-net	1.1.1	installed
 mirage-net-lwt	1.1.0	installed
-mirage-net-unix	2.4.1	root	git	https://github.com/sevenEng/mirage-net-psock.git
+mirage-net-psock	0.1.0	root	git	https://github.com/sevenEng/mirage-net-psock.git
 mirage-no-solo5	1	installed
 mirage-no-xen	1	installed
 mirage-profile	0.8.1	installed
