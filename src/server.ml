@@ -2,7 +2,7 @@ open Lwt.Infix
 open Mirage_types_lwt
 
 let service = Logs.Src.create "service" ~doc:"REST service of Bridge"
-module Log = (val Logs.src_log service : Logs.LOG)
+module Log = (val Logs_lwt.src_log service : Logs_lwt.LOG)
 
 module Make(Backend: Vnetif.BACKEND) = struct
   module Vnet = Vnetif.Make(Backend)
@@ -29,7 +29,7 @@ module Make(Backend: Vnetif.BACKEND) = struct
 
   let or_fail name m =
     Lwt.catch (fun () -> m) (fun e ->
-        Log.err (fun m -> m "%s failed: %s" name @@ Printexc.to_string e);
+        Log.err (fun m -> m "%s failed: %s" name @@ Printexc.to_string e) >>= fun () ->
         Lwt.fail e)
 
   let default_not_found _ req _ =
@@ -86,8 +86,9 @@ module Make(Backend: Vnetif.BACKEND) = struct
        >>= fun key' -> if key = key' then ok () else error_msg "Unauthorized: CM key invalid")
       |> function
       | Ok () ->
-          Log.info (fun m -> m "pass CM authentication!");
-          handler req
+          Lwt.bind
+            (Log.info (fun m -> m "pass CM authentication!"))
+            (fun () -> handler req)
       | Error (`Msg msg) -> respond' ~code:(`Code 401) (`String msg)
     in
     Opium_kernel.Rock.Middleware.create ~name ~filter
@@ -105,7 +106,7 @@ module Make(Backend: Vnetif.BACKEND) = struct
     fun (_: Http.conn) req body ->
       let req = Request.create ~body req in
       Lwt.catch (fun () -> handler req) (fun e ->
-          Log.err (fun m -> m "handler err: %s" (Printexc.to_string e));
+          Log.err (fun m -> m "handler err: %s" (Printexc.to_string e)) >>= fun () ->
           let body = Printexc.to_string e in
           let resp = Response.of_string_body ~code:Cohttp.Code.(`Code 500) body in
           Lwt.return resp)

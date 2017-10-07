@@ -53,7 +53,7 @@ module Dns_service = struct
         Lwt_unix.sleep sleep_time >>= fun () ->
         to_resolve () >>= keep_trying
     | `Resolved ip ->
-        Log.info (fun m -> m "resolved: %a" pp_ip ip) >>= fun () ->
+        Log.info (fun m -> m "resolved: %s %a" n pp_ip ip) >>= fun () ->
         Lwt.return ip in
     keep_trying maybe_ip
 
@@ -97,14 +97,14 @@ module Dns_service = struct
     begin
       let names = Packet.(List.map (fun {q_name; _} -> q_name) query.questions) in
       let name = List.hd names |> Name.to_string in
-      match resolve name with
-      | Some resolved ->
-          Log.info (fun m -> m "Dns_service: allowed to resolve %s" name) >>= fun () ->
+      resolve name >>= function
+      | Ok (src_ip, resolved) ->
+          Log.debug (fun m -> m "Dns_service: allowed %a to resolve %s" pp_ip src_ip name) >>= fun () ->
           let name = Dns.Name.of_string name in
           let rrs = Dns.Packet.[{ name; cls = RR_IN; flush = false; ttl = 0l; rdata = A resolved }] in
           Lwt.return Dns.Query.({ rcode = NoError; aa = true; answer = rrs; authority = []; additional = []})
-      | None ->
-          Log.info (fun m -> m "Dns_service: banned to resolve %s" name) >>= fun () ->
+      | Error src_ip ->
+          Log.info (fun m -> m "Dns_service: banned %a to resolve %s" pp_ip src_ip name) >>= fun () ->
           Lwt.return Query.({rcode = Packet.NXDomain; aa = true; answer = []; authority = []; additional = []})
     end >>= fun answer ->
     let resp = Query.response_of_answer query answer in
@@ -222,7 +222,7 @@ module Endpoints = struct
     mutable connections: Proto.Server.client_connection EndpMap.t;
     mutable push_fn: ((Cstruct.t * Frame.t) option -> unit) EndpMap.t;
     mutable push_cache: Proto.endpoint IpMap.t;
-    mutable req_queue: (Ipaddr.V4.t Lwt.u) ReqMap.t;
+    mutable req_queue: ((Ipaddr.V4.t, unit) result Lwt.u) ReqMap.t;
     mutex: Lwt_mutex.t;
   }
 
@@ -267,7 +267,7 @@ module Endpoints = struct
         Log.info (fun m -> m "ACK %a %ld" pp_ip ip id) >>= fun () ->
         Lwt_mutex.with_lock t.mutex (fun () ->
             let wakener = ReqMap.find id t.req_queue in
-            Lwt.wakeup wakener ip;
+            Lwt.wakeup wakener (Ok ip);
             t.req_queue <- ReqMap.remove id t.req_queue;
             Lwt.return_unit) >>= fun () ->
         comm_monitor t conn
@@ -283,14 +283,20 @@ module Endpoints = struct
         t.req_queue <- ReqMap.add id u t.req_queue;
         Lwt.return_unit)
 
+  let dequeue_req t id =
+    Lwt_mutex.with_lock t.mutex (fun () ->
+        t.req_queue <- ReqMap.remove id t.req_queue;
+        Lwt.return_unit)
+
   let _req_id = ref 0l
   let req_id () =
     let id = !_req_id in
     _req_id := Int32.succ id;
     id
 
-  let claim_fake_dst t ip =
+  let rec claim_fake_dst t ip =
     let fake, u = Lwt.wait () in
+    let time_out () = Lwt_unix.sleep 1.0 >>= fun () -> Lwt.return @@ Error () in
     endp_of_ip t ip >>= function
     | None ->
         Log.err (fun m -> m "no endp to fake dst for %a" pp_ip ip) >>= fun () ->
@@ -302,7 +308,13 @@ module Endpoints = struct
         Log.debug (fun m -> m "IP_REQ %ld on %s(%a) for %a" id endp.interface pp_ip endp.ip_addr pp_ip ip) >>= fun () ->
         enqueue_req t id u >>= fun () ->
         Proto.Server.send_comm conn comm >>= fun () ->
-        fake
+        Lwt.pick [fake; time_out ()] >>= function
+        | Ok ip -> Lwt.return ip
+        | Error () ->
+            Log.warn (fun m -> m "claim_fake_ip time out! retry...") >>= fun () ->
+            dequeue_req t id >>= fun () ->
+            claim_fake_dst t ip
+
 
   let register_endpoint t endp conn push =
     Lwt.async (fun () -> comm_monitor t conn);
@@ -347,8 +359,14 @@ module Policy = struct
         else Pervasives.compare (xx, xy) (yx, yy)
     end)
 
+  module IPSet = Set.Make(struct
+      type t = Ipaddr.V4.t
+      let compare = Ipaddr.V4.compare
+    end)
+
   type t = {
     mutable pairs : DomainPairSet.t;
+    mutable privileged: IPSet.t;
     mutable transport: IPPairSet.t;
     mutable resolve: (string * Ipaddr.V4.t) list IpMap.t;
     endpoints: Endpoints.t;
@@ -439,22 +457,48 @@ module Policy = struct
     Lwt.return_unit
 
 
+  let allow_privileged t src_ip =
+    t.privileged <- IPSet.add src_ip t.privileged;
+    Log.info (fun m -> m "allow privileged: %a" pp_ip src_ip)
+
+
   let is_authorized_transport {transport; _} ipx ipy =
     IPPairSet.mem (ipx, ipy) transport
+
+
+  let is_privileged_resolve t src_ip name =
+    if IPSet.mem src_ip t.privileged then
+      Dns_service.ip_of_name name >>= fun dst_ip ->
+      Endpoints.from_same_network t.endpoints src_ip dst_ip >>= function
+      | true ->
+          allow_resolve t src_ip name dst_ip >>= fun () ->
+          Lwt.return (Ok (src_ip, dst_ip))
+      | false ->
+          Endpoints.claim_fake_dst t.endpoints src_ip >>= fun dst_ip' ->
+          Endpoints.claim_fake_dst t.endpoints dst_ip >>= fun src_ip' ->
+          allow_resolve t src_ip name dst_ip' >>= fun () ->
+          allow_transport t src_ip dst_ip' >>= fun () ->
+          allow_transport t dst_ip src_ip' >>= fun () ->
+          NAT.add_rule t.nat (src_ip, dst_ip') (src_ip', dst_ip) >>= fun () ->
+          NAT.add_rule t.nat (dst_ip, src_ip') (dst_ip', src_ip) >>= fun () ->
+          Lwt.return (Ok (src_ip, dst_ip'))
+    else Lwt.return (Error src_ip)
+
 
   let is_authorized_resolve t ip name =
     if IpMap.mem ip t.resolve then
       let names = IpMap.find ip t.resolve in
-      if not @@ List.mem_assoc name names then None
-      else Some (List.assoc name names)
-    else None
+      if List.mem_assoc name names then Lwt.return @@ Ok (ip, List.assoc name names)
+      else is_privileged_resolve t ip name
+    else is_privileged_resolve t ip name
 
 
   let create endpoints nat () =
     let pairs = DomainPairSet.empty in
+    let privileged = IPSet.empty in
     let transport = IPPairSet.empty in
     let resolve = IpMap.empty in
-    {pairs; transport; resolve; endpoints; nat}
+    {pairs; privileged; transport; resolve; endpoints; nat}
 end
 
 
@@ -477,7 +521,7 @@ module Local = struct
   let is_to_local ip =
     match !instance with
     | None -> false
-    | Some {network} -> Ipaddr.V4.Prefix.mem ip network
+    | Some {address} -> 0 = Ipaddr.V4.compare ip address
 
 
   let local_virtual_mac = Macaddr.make_local (fun x -> x + 1)
@@ -550,21 +594,18 @@ module Local = struct
     let allow_handler = fun req ->
       Lwt.catch (fun () ->
           json_of_body_exn req >>= fun obj ->
-          (try
+          try
             let open Ezjsonm in
             let dict = get_dict (value obj) in
             let name = List.assoc "name" dict |> get_string in
             let peers = List.assoc "peers" dict |> get_list get_string in
-            Lwt.return (name, peers)
-          with exn -> Lwt.fail exn)
-          >>= fun (name, peers) ->
-          Lwt_list.map_p (fun peer -> Policy.allow_pair po name peer) peers >>= fun _ ->
-          let status = Cohttp.Code.(`OK) in
-          Lwt.return (status, `Json (`O [])))
-        (fun e ->
-           let msg = Printf.sprintf "error when try /connect: %s" (Printexc.to_string e) in
-           let status = Cohttp.Code.(`Code 500) in
-           Lwt.return (status, `String msg)) >>= fun (code, body) ->
+            Lwt_list.map_p (fun peer -> Policy.allow_pair po name peer) peers >>= fun _ ->
+            let status = Cohttp.Code.(`OK) in
+            Lwt.return (status, `Json (`O []))
+          with e -> Lwt.fail e) (fun e ->
+          let msg = Printf.sprintf "/connect err: %s" (Printexc.to_string e) in
+          let status = Cohttp.Code.(`Code 500) in
+          Lwt.return (status, `String msg)) >>= fun (code, body) ->
       respond' ~code body
     in
     post "/connect" allow_handler
@@ -586,9 +627,30 @@ module Local = struct
     in
     post "/disconnect" forbidden_handler
 
+  let add_privileged po =
+    let add_privileged_handler = fun req ->
+      Lwt.catch (fun () ->
+          json_of_body_exn req >>= fun obj ->
+          try
+            let open Ezjsonm in
+            let dict = get_dict (value obj) in
+            let src_ip_str = List.assoc "src_ip" dict |> get_string in
+            let src_ip = Ipaddr.V4.of_string_exn src_ip_str in
+            Policy.allow_privileged po src_ip >>= fun () ->
+            Lwt.return (`OK, `Json (`O []))
+          with e -> Lwt.fail e) (fun e ->
+          let msg = Printf.sprintf "/privileged err: %s" (Printexc.to_string e) in
+          Lwt.return (`Code 500, `String msg)) >>= fun (code, body) ->
+      respond' ~code body
+    in
+    post "/privileged" add_privileged_handler
 
   let start_service t po =
-    let callback = callback_of_routes [allow_route po; forbidden_route po] in
+    let callback = callback_of_routes [
+        allow_route po;
+        forbidden_route po;
+        add_privileged po;
+      ] in
     start t.service ~callback
 
 

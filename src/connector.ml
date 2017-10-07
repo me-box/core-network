@@ -9,7 +9,6 @@ module Ethif = Ethif.Make(Netif)
 module Arpv4 = Arpv4.Make(Ethif)(Mclock)(OS.Time)
 module Static_ipv4 = Static_ipv4.Make(Ethif)(Arpv4)
 
-
 module Make(N: NETWORK)(E: ETHIF)(Arp: ARP)(Ip: IPV4) = struct
 
   type ip_pool = {
@@ -36,11 +35,15 @@ module Make(N: NETWORK)(E: ETHIF)(Arp: ARP)(Ip: IPV4) = struct
 
   let use_ip ipp () =
     Lwt_mutex.with_lock ipp.mutex (fun () ->
+        let cnt = List.length ipp.free_ips in
+        if cnt < 1 then Lwt.return (Error ()) else
         let ip = List.hd ipp.free_ips in
         ipp.free_ips <- (List.tl ipp.free_ips);
         ipp.used_ips <- ip :: ipp.used_ips;
-        Lwt.return ip) >>= fun ip ->
-    Log.info (fun m -> m "%s used ip %a" !_interface pp_ip ip) >>= fun () ->
+        Lwt.return (Ok ip))
+
+    >>= fun ip ->
+ 
     Lwt.return ip
 
 
@@ -108,15 +111,20 @@ module Make(N: NETWORK)(E: ETHIF)(Arp: ARP)(Ip: IPV4) = struct
     let open Proto in
     let rec provision_ip () =
       Client.recv_comm conn >>= function
-      | IP_REQ seq ->
-          use_ip ipp () >>= fun ip ->
-          Client.send_comm conn (ACK (ip, seq)) >>= fun () ->
-          Lwt_condition.signal cond ();
-          Arp.add_ip arp ip >>= fun () ->
-          provision_ip ()
-      | _ ->
+      | ACK _ | IP_DUP _ ->
           Log.err (fun m -> m "provision ip: not IP_REQ") >>= fun () ->
-          provision_ip () in
+          provision_ip ()
+      | IP_REQ seq ->
+          use_ip ipp () >>= function
+          | Ok ip ->
+              Client.send_comm conn (ACK (ip, seq)) >>= fun () ->
+              Lwt_condition.signal cond ();
+              Arp.add_ip arp ip >>= fun () ->
+              Log.info (fun m -> m "%s used ip %a" !_interface pp_ip ip) >>= fun () ->
+              provision_ip ()
+          | Error () ->
+              Log.warn (fun m -> m "not enough ip in pool! drop req %ld" seq) >>= fun () ->
+              provision_ip () in
 
     let delete_used arp ip =
       Client.send_comm conn (IP_DUP ip) >>= fun () ->
@@ -132,6 +140,7 @@ module Make(N: NETWORK)(E: ETHIF)(Arp: ARP)(Ip: IPV4) = struct
   let maintain_ipp arp conn endp =
     let ipp = {free_ips = []; used_ips = []; mutex = Lwt_mutex.create ()} in
     let cond = Lwt_condition.create () in
+    Lwt_unix.sleep 1.0 >>= fun () ->
     populate_pool ipp arp cond endp <&> drain_pool ipp arp cond conn
 
 
@@ -179,7 +188,8 @@ module Make(N: NETWORK)(E: ETHIF)(Arp: ARP)(Ip: IPV4) = struct
           | Ok () ->
               from_bridge eth arp conn
           | Error e ->
-              Log.err (fun m -> m "from bridge E.write: %a" E.pp_error e))
+              Log.err (fun m -> m "%s from bridge E.write: %a" !_interface E.pp_error e)
+              >>= fun () -> from_bridge eth arp conn)
     | Error e ->
         Log.err (fun m -> m "from bridge Arp.query: %a" Arp.pp_error e)
 
@@ -191,12 +201,13 @@ module Make(N: NETWORK)(E: ETHIF)(Arp: ARP)(Ip: IPV4) = struct
       let arpv4 = Arp.input arp in
       let ipv6 = drop_pkt in
       let fn = E.input ~arpv4 ~ipv4 ~ipv6 eth in
-      N.listen nf fn >>= function
-      | Ok () ->
-          Log.info (fun m -> m "to_bridge ok: %s" @@ Proto.endp_to_string endp)
-      | Error e ->
-          Log.err (fun m -> m "to_bridge err: %a" N.pp_error e)
-    in
+      let rec aux () =
+        N.listen nf fn >>= function
+        | Ok () ->
+            Log.info (fun m -> m "to_bridge ok: %s" @@ Proto.endp_to_string endp)
+        | Error e ->
+            Log.err (fun m -> m "to_bridge err: %a" N.pp_error e) >>= aux in
+      aux () in
 
     Lwt.pick [
       to_bridge eth arp conn;
@@ -222,8 +233,9 @@ end
 let start dev addr =
   let t () =
     Netif.connect dev >>= fun net ->
+    let mtu = Netif.mtu net in
     Mclock.connect () >>= fun mclock ->
-    Ethif.connect net >>= fun ethif ->
+    Ethif.connect ~mtu net >>= fun ethif ->
     Arpv4.connect ethif mclock >>= fun arp ->
     let network, ip = Ipaddr.V4.Prefix.of_address_string_exn addr in
     Static_ipv4.connect ~ip ~network ~gateway:None ethif arp >>= fun ipv4 ->
@@ -238,4 +250,4 @@ let start dev addr =
           Lwt.catch (fun () -> t ()) (fun exn ->
               Log.err (fun m -> m "connector err: %s" (Printexc.to_string exn))))
         (fun () ->
-           Log.debug (fun m -> m "connector on [%s/%s] existed!" dev addr)))
+           Log.warn (fun m -> m "connector on [%s/%s] exited!" dev addr)))
