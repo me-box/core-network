@@ -10,4 +10,4 @@ iptables -F INPUT
 iptables -A INPUT -i lo -j ACCEPT
 
 echo starting bridge...
-./bridge
+./bridge $@

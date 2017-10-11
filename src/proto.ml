@@ -10,15 +10,16 @@ type connection = Lwt_io.input Lwt_io.channel * Lwt_io.output_channel
 type endpoint = {
   interface: string;
   mac_addr : Macaddr.t;
+  mtu      : Cstruct.uint16;
   ip_addr  : Ipaddr.V4.t;
-  netmask  : int;
+  netmask  : Cstruct.uint16;
 }
 
 
-let sizeof_endp = 8 + 6 + 4 + 1
+let sizeof_endp = 8 + 6 + 2 + 4 + 2
 
 
-let marshal_endp {interface; mac_addr; ip_addr; netmask} buf =
+let marshal_endp {interface; mac_addr; mtu; ip_addr; netmask} buf =
   let intf =
     let tmp = Bytes.make 8 '\000' in
     let len = String.length interface in
@@ -27,8 +28,9 @@ let marshal_endp {interface; mac_addr; ip_addr; netmask} buf =
   in
   Cstruct.blit_from_bytes intf 0 buf 0 8;
   Cstruct.blit_from_bytes (Bytes.of_string @@ Macaddr.to_bytes mac_addr) 0 buf 8 6;
-  Cstruct.blit_from_bytes (Bytes.of_string @@ Ipaddr.V4.to_bytes ip_addr) 0 buf (8 + 6) 4;
-  Cstruct.set_char buf (8 + 6 + 4) (char_of_int netmask);
+  Cstruct.BE.set_uint16 buf (8 + 6) mtu;
+  Cstruct.blit_from_bytes (Bytes.of_string @@ Ipaddr.V4.to_bytes ip_addr) 0 buf (8 + 6 + 2) 4;
+  Cstruct.BE.set_uint16 buf (8 + 6 + 2 + 4) netmask;
   Cstruct.shift buf sizeof_endp
 
 
@@ -39,14 +41,15 @@ let unmarshal_endp buf =
     with Not_found -> tmp
   in
   let mac_addr = Macaddr.of_bytes_exn @@ Cstruct.(to_string @@ sub buf 8 6) in
-  let ip_addr = Ipaddr.V4.of_bytes_exn @@ Cstruct.(to_string @@ sub buf (8 + 6) 4) in
-  let netmask = int_of_char @@ Cstruct.get_char buf (8 + 6 + 4) in
-  {interface; mac_addr; ip_addr; netmask}, Cstruct.shift buf sizeof_endp
+  let mtu = Cstruct.BE.get_uint16 buf (8 + 6) in
+  let ip_addr = Ipaddr.V4.of_bytes_exn @@ Cstruct.(to_string @@ sub buf (8 + 6 + 2) 4) in
+  let netmask = Cstruct.BE.get_uint16 buf (8 + 6 + 2 + 4) in
+  {interface; mac_addr; mtu; ip_addr; netmask}, Cstruct.shift buf sizeof_endp
 
-let endp_to_string {interface; mac_addr; ip_addr; netmask} =
-  Printf.sprintf "endp %s %s %s/%d" interface (Macaddr.to_string mac_addr) (Ipaddr.V4.to_string ip_addr) netmask
+let endp_to_string {interface; mac_addr; mtu; ip_addr; netmask} =
+  Printf.sprintf "endp %s %s %d  %s/%d" interface (Macaddr.to_string mac_addr) mtu (Ipaddr.V4.to_string ip_addr) netmask
 
-let create_endp interface mac_addr ip_addr netmask = {interface; mac_addr; ip_addr; netmask}
+let create_endp interface mac_addr mtu ip_addr netmask = {interface; mac_addr; mtu; ip_addr; netmask}
 
 
 type command =
@@ -96,23 +99,34 @@ let send typ oc buf =
   let hd = Cstruct.create sizeof_hd in
   Cstruct.BE.set_uint16 hd 0 len;
   Cstruct.set_uint8 hd 2 typ;
-  Lwt_io.write oc (Cstruct.to_string @@ Cstruct.sub hd 0 sizeof_hd) >>= fun () ->
-  Lwt_io.write oc (Cstruct.to_string buf) >>= fun () ->
-  Lwt_io.flush oc
+  Lwt.catch (fun () ->
+      Lwt_io.write oc (Cstruct.to_string @@ Cstruct.sub hd 0 sizeof_hd) >>= fun () ->
+      Lwt_io.write oc (Cstruct.to_string buf) >>= fun () ->
+      Lwt_io.flush oc) (function
+    | Unix.(Unix_error (EBADF, _, _)) -> Log.err (fun m -> m "EBADF of typ %d len %d" typ len)
+    | exn -> Lwt.fail exn)
 
 let recv ic =
-  let hd = Bytes.create sizeof_hd in
-  Lwt_io.read_into_exactly ic hd 0 sizeof_hd >>= fun () ->
-  let hd = Cstruct.of_bytes hd in
-  let len = Cstruct.BE.get_uint16 hd 0 in
-  let typ = Cstruct.get_uint8 hd 2 in
-  let buf = Bytes.create len in
-  Lwt_io.read_into_exactly ic buf 0 len >>= fun () ->
-  (match typ with
-  | 0 -> `PKT (Cstruct.of_bytes buf)
-  | 1 -> `COMM (unmarshal_command (Cstruct.of_bytes buf))
-  | _ -> assert false)
-  |> Lwt.return
+  Lwt.catch (fun () ->
+      let hd = Bytes.create sizeof_hd in
+      Lwt_io.read_into_exactly ic hd 0 sizeof_hd >>= fun () ->
+      let hd = Cstruct.of_bytes hd in
+      let len = Cstruct.BE.get_uint16 hd 0 in
+      let typ = Cstruct.get_uint8 hd 2 in
+      let buf = Bytes.create len in
+      Lwt_io.read_into_exactly ic buf 0 len >>= fun () ->
+      (match typ with
+      | 0 -> `PKT (Cstruct.of_bytes buf)
+      | 1 -> `COMM (unmarshal_command (Cstruct.of_bytes buf))
+      | _ -> assert false)
+      |> Lwt.return) (function
+    | End_of_file ->
+        Log.err (fun m -> m "ic closed!") >>= fun () ->
+        Lwt.fail End_of_file
+    | Unix.(Unix_error (EBADF, _, _)) as exn ->
+        Log.err (fun m -> m "EBADF in recv") >>= fun () ->
+        Lwt.fail exn
+    | exn -> Lwt.fail exn)
 
 
 let split_streams in_ch =
@@ -171,6 +185,7 @@ module Client = struct
   let recv_comm (_, comm_s, _, _) = Lwt_stream.next comm_s
 
   let disconnect (_, _, oc, close) =
+    Log.warn (fun m -> m "client about to close connection!") >>= fun () ->
     Lwt.catch (fun () ->
         Lwt.wakeup close ();
         Lwt_io.close oc) (function
@@ -214,7 +229,13 @@ module Server = struct
                   let endp, _ = unmarshal_endp @@ Cstruct.of_bytes endp_buf in
                   let () = endp_ptr := Some endp in
                   let pkt_s, comm_s, _ = split_streams ic in
-                  cb endp (pkt_s, comm_s, oc)) (fun () -> Lwt_unix.close client_fd))
+                  cb endp (pkt_s, comm_s, oc)) (fun () ->
+                  Log.warn (fun m -> m "server about to close connection!") >>= (fun () ->
+                  match !endp_ptr with
+                  | None -> Lwt.return_unit
+                  | Some endp ->
+                      Log.warn (fun m -> m "client endp to close: %s" (endp_to_string endp))) >>= fun () ->
+                  Lwt_unix.close client_fd))
             (function
             | End_of_file ->
                 let endp_info = match !endp_ptr with None -> "" | Some e -> endp_to_string e in
