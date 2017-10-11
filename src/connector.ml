@@ -7,9 +7,8 @@ module Log = (val Logs_lwt.src_log connector : Logs_lwt.LOG)
 let _ = Printexc.record_backtrace true
 module Ethif = Ethif.Make(Netif)
 module Arpv4 = Arpv4.Make(Ethif)(Mclock)(OS.Time)
-module Static_ipv4 = Static_ipv4.Make(Ethif)(Arpv4)
 
-module Make(N: NETWORK)(E: ETHIF)(Arp: ARP)(Ip: IPV4) = struct
+module Make(N: NETWORK)(E: ETHIF)(Arp: ARP) = struct
 
   type ip_pool = {
     mutable free_ips: Ipaddr.V4.t list;
@@ -31,7 +30,7 @@ module Make(N: NETWORK)(E: ETHIF)(Arp: ARP)(Ip: IPV4) = struct
     Lwt_mutex.with_lock ipp.mutex (fun () ->
         if not @@ List.mem ip ipp.free_ips then ipp.free_ips <- ip :: ipp.free_ips;
         Lwt.return_unit) >>= fun () ->
-    Log.info (fun m -> m "%s got free ip %a" !_interface pp_ip ip)
+    Log.debug (fun m -> m "%s got free ip %a" !_interface pp_ip ip)
 
   let use_ip ipp () =
     Lwt_mutex.with_lock ipp.mutex (fun () ->
@@ -43,7 +42,6 @@ module Make(N: NETWORK)(E: ETHIF)(Arp: ARP)(Ip: IPV4) = struct
         Lwt.return (Ok ip))
 
     >>= fun ip ->
- 
     Lwt.return ip
 
 
@@ -80,8 +78,7 @@ module Make(N: NETWORK)(E: ETHIF)(Arp: ARP)(Ip: IPV4) = struct
             delete_duplicated ~delete_used ip ipp cond
         | Error _ -> Lwt.return_unit)
 
-
-  let populate_pool ipp arp cond Proto.({ip_addr; netmask}) =
+  let populate_pool ipp arp cond Proto.({interface; ip_addr; netmask}) =
     let network =
       let prefix = Ipaddr.V4.Prefix.make netmask ip_addr in
       Ipaddr.V4.Prefix.network prefix in
@@ -102,7 +99,11 @@ module Make(N: NETWORK)(E: ETHIF)(Arp: ARP)(Ip: IPV4) = struct
         | Error _ ->
             put_ip ipp candidate >>= fun () ->
             count_and_put ()
-      else Lwt_condition.wait cond >>= count_and_put
+      else
+      Log.info (fun m -> m "%s pool full of %d free IPs" interface _free_ip_cnt) >>= fun () ->
+      Lwt_condition.wait cond >>= fun () ->
+      Log.info (fun m -> m "%s free IP used, start collecting new..." interface) >>= fun () ->
+      count_and_put ()
     in
     count_and_put ()
 
@@ -215,7 +216,7 @@ module Make(N: NETWORK)(E: ETHIF)(Arp: ARP)(Ip: IPV4) = struct
     ]
 
 
-  let start ?(socket_path="/var/tmp/bridge") nf eth arp ip endp =
+  let start ?(socket_path="/var/tmp/bridge") nf eth arp endp =
     let () = _interface := endp.Proto.interface in
     Proto.Client.connect socket_path endp >>= function
     | Ok conn ->
@@ -238,12 +239,11 @@ let start dev addr =
     Ethif.connect ~mtu net >>= fun ethif ->
     Arpv4.connect ethif mclock >>= fun arp ->
     let network, ip = Ipaddr.V4.Prefix.of_address_string_exn addr in
-    Static_ipv4.connect ~ip ~network ~gateway:None ethif arp >>= fun ipv4 ->
-    let module M = Make(Netif)(Ethif)(Arpv4)(Static_ipv4) in
+    let module M = Make(Netif)(Ethif)(Arpv4) in
     let mac = Ethif.mac ethif in
     let netmask = Ipaddr.V4.Prefix.bits network in
-    let endp = Proto.create_endp dev mac ip netmask in
-    M.start net ethif arp ipv4 endp
+    let endp = Proto.create_endp dev mac mtu ip netmask in
+    M.start net ethif arp endp
   in
   Lwt.async (fun () ->
       Lwt.finalize (fun () ->

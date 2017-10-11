@@ -19,7 +19,7 @@ let need_space_for buf n description =
   then Error (`Msg (Printf.sprintf "buffer is too short for %s: needed %d bytes but only have %d" description n (Cstruct.len buf)))
   else Ok ()
 
-let parse_ipv4_pkt inner =
+let parse_ipv4_pkt_exn inner =
   need_space_for inner 16 "IP datagram"
   >>= fun () ->
   let vihl  = Cstruct.get_uint8     inner 0 in
@@ -72,6 +72,12 @@ let parse_ipv4_pkt inner =
   >>= fun payload ->
   Ok (Ipv4 { src; dst; dnf; ihl; raw; payload })
 
+
+let parse_ipv4_pkt buf =
+  try parse_ipv4_pkt_exn buf
+  with exn -> Error (`Msg (Printexc.to_string exn))
+
+
 let parse_arp_pkt inner =
   need_space_for inner 2 "ARP header"
   >>= fun () ->
@@ -112,10 +118,12 @@ let parse buf =
     Error (`Msg ("Failed to parse ethernet frame: " ^ (Printexc.to_string e)))
 
 
-let fr_info = function
+let rec fr_info = function
 | Ethernet {src; dst; _} -> Printf.sprintf "Ethernet %s ->%s" (Macaddr.to_string src) (Macaddr.to_string dst)
 | Arp {op} -> Printf.sprintf "Arp %s" (match op with `Request -> "request" | `Reply -> "reply" | `Unknown -> "unknown")
-| Ipv4 {src; dst; _} -> Printf.sprintf "Ipv4 %s -> %s" (Ipaddr.V4.to_string src) (Ipaddr.V4.to_string dst)
+| Ipv4 {src; dst; payload} ->
+    let payload_str = fr_info payload in
+    Printf.sprintf "Ipv4 %s -> %s {%s}" (Ipaddr.V4.to_string src) (Ipaddr.V4.to_string dst) payload_str
 | Udp {src; dst; _} -> Printf.sprintf "Udp %d -> %d" src dst
 | Tcp {src; dst; _} -> Printf.sprintf "Tcp %d -> %d" src dst
 | Icmp _ -> "Icmp" | Payload _ -> "Payload" | Unknown -> "Unknown"

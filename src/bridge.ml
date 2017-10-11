@@ -4,8 +4,8 @@ let bridge = Logs.Src.create "bridge" ~doc:"Bridge"
 module Log = (val Logs_lwt.src_log bridge : Logs_lwt.LOG)
 
 let hexdump_buf_debug desp buf =
-  Log.debug (fun m ->
-      let b = Buffer.create 128 in
+  Log.warn (fun m ->
+      let b = Buffer.create 4096 in
       Cstruct.hexdump_to_buffer b buf;
       m "%s len:%d pkt:%s" desp (Cstruct.len buf) (Buffer.contents b))
 
@@ -48,12 +48,13 @@ module Dns_service = struct
     try_resolve n () >>= fun maybe_ip ->
     let rec keep_trying = function
     | `Later (n, to_resolve) ->
-        Log.info (fun m -> m "to resolve %s after %fs" n sleep_time) >>= fun () ->
+        Log.debug (fun m -> m "to resolve %s after %fs" n sleep_time) >>= fun () ->
         Lwt_unix.sleep sleep_time >>= fun () ->
         to_resolve () >>= keep_trying
     | `Resolved ip ->
         Log.info (fun m -> m "resolved: %s %a" n pp_ip ip) >>= fun () ->
         Lwt.return ip in
+    Log.info (fun m -> m "trying to resolve %s..." n) >>= fun () ->
     keep_trying maybe_ip
 
 
@@ -731,6 +732,7 @@ module Dispatcher = struct
       Endpoints.to_push t.endpoints nat_dst_ip (nat_buf, nat_pkt) >>= (function
         | Ok () -> Lwt.return_unit
         | Error (`MTU mtu) ->
+            Log.debug (fun m -> m "from endpoint %s: %s (len:%d)" endp.Proto.interface (Frame.fr_info pkt) (Cstruct.len buf)) >>= fun () ->
             let jumbo_hd = Cstruct.sub buf 0 (ihl * 4 + 8) in
             Endpoints.notify_mtu t.endpoints src_ip mtu jumbo_hd)
     else Log.warn (fun m -> m "Dispatcher: dropped pkt %a -> %a" pp_ip src_ip pp_ip dst_ip)
@@ -746,11 +748,12 @@ let rec from_endpoint endp conn push_in =
   (*hexdump_buf_debug "from_endpoint" buf >>= fun () ->*)
   Frame.parse_ipv4_pkt buf |> function
   | Ok fr ->
-      Log.info (fun m -> m "from endpoint %s: %s (len:%d)" endp.Proto.interface (Frame.fr_info fr) (Cstruct.len buf)) >>= fun () ->
+      Log.debug (fun m -> m "from endpoint %s: %s (len:%d)" endp.Proto.interface (Frame.fr_info fr) (Cstruct.len buf)) >>= fun () ->
       push_in @@ Some (buf, fr);
       from_endpoint endp conn push_in
   | Error (`Msg msg) ->
-      Log.warn (fun m -> m "err parsing incoming pkt %s" msg) >>= fun () ->
+      Log.warn (fun m -> m "%s err parsing incoming pkt %s" endp.Proto.interface msg) >>= fun () ->
+      hexdump_buf_debug endp.Proto.interface buf >>= fun () ->
       from_endpoint endp conn push_in
 
 
@@ -762,7 +765,7 @@ let rec to_endpoint endp conn out_s =
       match Frame.parse_ipv4_pkt buf with
       | Ok pkt ->
           (*hexdump_buf_debug "to_endpoint" buf >>= fun () ->*)
-          Log.info (fun m -> m "to endpoint %s: %s (len:%d)" endp.Proto.interface (Frame.fr_info pkt) (Cstruct.len buf)) >>= fun () ->
+          Log.debug (fun m -> m "to endpoint %s: %s (len:%d)" endp.Proto.interface (Frame.fr_info pkt) (Cstruct.len buf)) >>= fun () ->
           Proto.Server.send_pkt conn buf >>= fun () ->
           to_endpoint endp conn out_s
       | Error (`Msg msg) -> Log.warn (fun m -> m "to endpoint %s: %s (len: %d)" endp.Proto.interface msg (Cstruct.len buf))
