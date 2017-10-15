@@ -125,28 +125,56 @@ module NAT = struct
         else compare xx yy
     end)
 
+  module IPMap = Map.Make(struct
+      type t = Ipaddr.V4.t
+      let compare = Ipaddr.V4.compare
+    end)
+
+  (* translation: (src_ip, dst_ip) => (nat_src_ip, nat_dst_ip) *)
+  (* rule_handles: src_ip => (src_ip, dst_ip) list *)
   type  t = {
     mutable translation: pair PairMap.t;
-    mutable rule_handles: pair PairMap.t;
+    mutable rule_handles: pair list IPMap.t;
   }
+
+  let get_rule_handles t ip =
+    if IPMap.mem ip t.rule_handles then Lwt.return @@ IPMap.find ip t.rule_handles
+    else Lwt.return_nil
+
+  let get_translation t p =
+    if PairMap.mem p t.translation then [PairMap.find p t.translation]
+    else []
 
   let add_rule t px py =
     t.translation <- PairMap.add px py t.translation;
-    let handle = fst px, snd py in
-    t.rule_handles <- PairMap.add handle px t.rule_handles;
+    let handle_key = fst px in
+    let handle_value =
+      if IPMap.mem handle_key t.rule_handles then
+        let value = IPMap.find handle_key t.rule_handles in
+        if List.mem px value then value else px :: value
+      else [px] in
+    t.rule_handles <- IPMap.add handle_key handle_value t.rule_handles;
     Log.info (fun m -> m "new NAT rule: (%a -> %a) => (%a -> %a)"
                  pp_ip (fst px) pp_ip (snd px) pp_ip (fst py) pp_ip (snd py))
 
+  let remove_rule t p =
+    if PairMap.mem p t.translation then
+      let natted = PairMap.find p t.translation in
+      t.translation <- PairMap.remove p t.translation;
+      Log.info (fun m -> m "NAT rule deleted: (%a -> %a) => (%a -> %a)"
+               pp_ip (fst p) pp_ip (snd p) pp_ip (fst natted) pp_ip (snd natted))
+    else Lwt.return_unit >>= fun () ->
 
-  let remove_rule t handle =
-    (if PairMap.mem handle t.rule_handles then
-       let rule_key = PairMap.find handle t.rule_handles in
-       let fake_dst = snd rule_key in
-       t.translation <- PairMap.remove rule_key t.translation;
-       t.rule_handles <- PairMap.remove handle t.rule_handles;
-       fake_dst
-     else fst handle)
-    |> Lwt.return
+    let handle_key = fst p in
+    if IPMap.mem handle_key t.rule_handles then
+      let handles = IPMap.find handle_key t.rule_handles in
+      if List.mem p handles then
+        let handles' = List.filter (fun p' -> p' <> p) handles in
+        t.rule_handles <- IPMap.add handle_key handles' t.rule_handles;
+        Lwt.return_unit
+      else Lwt.return_unit
+    else Lwt.return_unit
+
 
   let set_ipv4_checksum buf ihl =
     let hd = Cstruct.sub buf 0 (4 * ihl) in
@@ -192,7 +220,7 @@ module NAT = struct
 
   let create () =
     let translation = PairMap.empty in
-    let rule_handles = PairMap.empty in
+    let rule_handles = IPMap.empty in
     {translation; rule_handles}
 end
 
@@ -409,9 +437,26 @@ module Policy = struct
     nat: NAT.t;
   }
 
+
+  let get_related_peers t n =
+    DomainPairSet.fold (fun (nx, ny) acc ->
+        if nx = n then ny :: acc
+        else if ny = n then nx :: acc
+        else acc) t.pairs []
+    |> Lwt.return
+
   let add_pair t nx ny =
     t.pairs <- DomainPairSet.add (nx, ny) t.pairs;
     Lwt.return_unit
+
+  let remove_pair t nx ny =
+    t.pairs <- DomainPairSet.remove (nx, ny) t.pairs;
+    Lwt.return_unit
+
+
+  let get_resolve t src_ip =
+    if IpMap.mem src_ip t.resolve then Lwt.return @@ IpMap.find src_ip t.resolve
+    else Lwt.return_nil
 
   let allow_resolve t src_ip name dst_ip =
     if IpMap.mem src_ip t.resolve
@@ -422,29 +467,26 @@ module Policy = struct
     else t.resolve <- IpMap.add src_ip [name, dst_ip] t.resolve;
     Log.info (fun m -> m "allow %a to resolve %s (as %a)" pp_ip src_ip name pp_ip dst_ip)
 
-  let allow_transport t src_ip dst_ip =
-    t.transport <- IPPairSet.add (src_ip, dst_ip) t.transport;
-    Lwt.return_unit
-
-
   let forbidden_resolve t src_ip name =
     if IpMap.mem src_ip t.resolve
     then
       let names = IpMap.find src_ip t.resolve in
       let names' = List.remove_assoc name names in
-      t.resolve <- IpMap.add src_ip names' t.resolve;
-      Lwt.return_unit
-    else Lwt.return_unit
+      t.resolve <- IpMap.add src_ip names' t.resolve
+    else ();
+    Log.info (fun m -> m "forbidden %a to resolve %s" pp_ip src_ip name)
+
+
+  let allow_transport t src_ip dst_ip =
+    t.transport <- IPPairSet.add (src_ip, dst_ip) t.transport;
+    Lwt.return_unit
 
   let forbidden_transport t src_ip dst_ip =
     t.transport <- IPPairSet.remove (src_ip, dst_ip) t.transport;
     Lwt.return_unit
 
-  let remove_pair t nx ny =
-    t.pairs <- DomainPairSet.remove (nx, ny) t.pairs;
-    Lwt.return_unit
 
-  let process_allowed_pair t nx ny =
+  let process_pair_connection t nx ny =
     if DomainPairSet.mem (nx, ny) t.pairs then Lwt.return_unit else
     Lwt_list.map_s Dns_service.ip_of_name [nx; ny] >>= fun ips ->
     let ipx = List.hd ips
@@ -473,24 +515,29 @@ module Policy = struct
         Lwt.return_unit
 
 
-  let allow_pair t nx ny =
+  let connect t nx ny =
     Lwt.async (fun () ->
-        process_allowed_pair t nx ny >>= fun () ->
-        Log.info (fun m -> m "Policy.allow %s <> %s" nx ny));
+        process_pair_connection t nx ny >>= fun () ->
+        Log.info (fun m -> m "Policy.connect %s <> %s" nx ny));
     Lwt.return_unit
 
-
-  let forbidden_pair t nx ny =
-    remove_pair t nx ny >>= fun () ->
-    Dns_service.ip_of_name nx >>= fun ipx ->
-    Dns_service.ip_of_name ny >>= fun ipy ->
-    forbidden_resolve t ipx ny >>= fun () ->
-    forbidden_resolve t ipy nx >>= fun () ->
-    NAT.remove_rule t.nat (ipx, ipy) >>= fun ipy' ->
-    NAT.remove_rule t.nat (ipy, ipx) >>= fun ipx' ->
-    forbidden_transport t ipx ipy' >>= fun () ->
-    forbidden_transport t ipy ipx' >>= fun () ->
-    Lwt.return_unit
+  let disconnect t n ip =
+    get_resolve t ip >>= fun resolve ->
+    Lwt_list.iter_p (fun (name, _) -> forbidden_resolve t ip name) resolve >>= fun () ->
+    get_related_peers t n >>= fun peers ->
+    Lwt_list.iter_p (fun peer -> remove_pair t n peer) peers >>= fun () ->
+    NAT.get_rule_handles t.nat ip >>= fun handles ->
+    Lwt_list.iter_p (fun handle ->
+        let translation = NAT.get_translation t.nat handle in
+        let src, dst = handle in
+        forbidden_transport t src dst >>= fun () ->
+        NAT.remove_rule t.nat handle >>= fun () ->
+        if List.length translation <> 0 then
+          let dst', src' = List.hd translation in
+          forbidden_transport t src' dst' >>= fun () ->
+          NAT.remove_rule t.nat (src', dst')
+        else Lwt.return_unit) handles >>= fun () ->
+    Log.info (fun m -> m "Policy.disconnect %s" n)
 
 
   let allow_privileged t src_ip =
@@ -627,8 +674,8 @@ module Local = struct
 
   open Service
 
-  let allow_route po =
-    let allow_handler = fun req ->
+  let connect_for po =
+    let connect_handler = fun req ->
       Lwt.catch (fun () ->
           json_of_body_exn req >>= fun obj ->
           try
@@ -636,33 +683,40 @@ module Local = struct
             let dict = get_dict (value obj) in
             let name = List.assoc "name" dict |> get_string in
             let peers = List.assoc "peers" dict |> get_list get_string in
-            Lwt_list.map_p (fun peer -> Policy.allow_pair po name peer) peers >>= fun _ ->
+            Lwt_list.map_p (fun peer -> Policy.connect po name peer) peers >>= fun _ ->
             let status = Cohttp.Code.(`OK) in
             Lwt.return (status, `Json (`O []))
           with e -> Lwt.fail e) (fun e ->
-          let msg = Printf.sprintf "/connect err: %s" (Printexc.to_string e) in
+          let msg = Printf.sprintf "/connect server err: %s" (Printexc.to_string e) in
           let status = Cohttp.Code.(`Code 500) in
           Lwt.return (status, `String msg)) >>= fun (code, body) ->
       respond' ~code body
     in
-    post "/connect" allow_handler
+    post "/connect" connect_handler
 
-  let forbidden_route po =
-    let forbidden_handler = fun req ->
-      json_of_body_exn req >>= fun obj ->
-      Ezjsonm.(get_pair get_string get_string @@ value obj)
-      |> fun (x, y) ->
+  let disconnect_for po =
+    let disconnect_handler = fun req ->
       Lwt.catch (fun () ->
-          Policy.forbidden_pair po x y >>= fun () ->
-          let status = Cohttp.Code.(`OK) in
-          Lwt.return (status, `Json (`O [])))
-        (fun e ->
-           let msg = Printf.sprintf "Policy.forbidden_pair %s %s: %s" x y (Printexc.to_string e) in
-           let status = Cohttp.Code.(`Code 500) in
-           Lwt.return (status, `String msg)) >>= fun (code, body) ->
+          json_of_body_exn req >>= fun obj ->
+          try
+            let open Ezjsonm in
+            let dict = get_dict (value obj) in
+            let name = List.assoc "name" dict |> get_string in
+            let ip   =
+              List.assoc "ip" dict
+              |> get_string
+              |> Ipaddr.V4.Prefix.of_address_string_exn
+              |> snd in
+            Policy.disconnect po name ip >>= fun () ->
+            let status = Cohttp.Code.(`OK) in
+            Lwt.return (status, `Json (`O []))
+          with e -> Lwt.fail e) (fun e ->
+          let msg = Printf.sprintf "/disconnect server err: %s" (Printexc.to_string e) in
+          let status = Cohttp.Code.(`Code 500) in
+          Lwt.return (status, `String msg)) >>= fun (code, body) ->
       respond' ~code body
     in
-    post "/disconnect" forbidden_handler
+    post "/disconnect" disconnect_handler
 
   let add_privileged po =
     let add_privileged_handler = fun req ->
@@ -676,7 +730,7 @@ module Local = struct
             Policy.allow_privileged po src_ip >>= fun () ->
             Lwt.return (`OK, `Json (`O []))
           with e -> Lwt.fail e) (fun e ->
-          let msg = Printf.sprintf "/privileged err: %s" (Printexc.to_string e) in
+          let msg = Printf.sprintf "/privileged server err: %s" (Printexc.to_string e) in
           Lwt.return (`Code 500, `String msg)) >>= fun (code, body) ->
       respond' ~code body
     in
@@ -684,8 +738,8 @@ module Local = struct
 
   let start_service t po =
     let callback = callback_of_routes [
-        allow_route po;
-        forbidden_route po;
+        connect_for po;
+        disconnect_for po;
         add_privileged po;
       ] in
     start t.service ~callback
@@ -732,13 +786,13 @@ module Dispatcher = struct
       Endpoints.to_push t.endpoints nat_dst_ip (nat_buf, nat_pkt) >>= (function
         | Ok () -> Lwt.return_unit
         | Error (`MTU mtu) ->
-            Log.debug (fun m -> m "from endpoint %s: %s (len:%d)" endp.Proto.interface (Frame.fr_info pkt) (Cstruct.len buf)) >>= fun () ->
+            Log.info (fun m -> m "from endpoint %s: %s (len:%d)" endp.Proto.interface (Frame.fr_info pkt) (Cstruct.len buf)) >>= fun () ->
             let jumbo_hd = Cstruct.sub buf 0 (ihl * 4 + 8) in
             Endpoints.notify_mtu t.endpoints src_ip mtu jumbo_hd)
     else Log.warn (fun m -> m "Dispatcher: dropped pkt %a -> %a" pp_ip src_ip pp_ip dst_ip)
 
 
-  let create endpoints policy nat =
+  let create endpoints nat policy =
     {endpoints; policy; nat}
 end
 
@@ -752,8 +806,7 @@ let rec from_endpoint endp conn push_in =
       push_in @@ Some (buf, fr);
       from_endpoint endp conn push_in
   | Error (`Msg msg) ->
-      Log.warn (fun m -> m "%s err parsing incoming pkt %s" endp.Proto.interface msg) >>= fun () ->
-      hexdump_buf_debug endp.Proto.interface buf >>= fun () ->
+      Log.warn (fun m -> m "%s err parsing incoming pkt %s: DROP" endp.Proto.interface msg) >>= fun () ->
       from_endpoint endp conn push_in
 
 
@@ -788,7 +841,7 @@ let main path logs =
   let endpoints = Endpoints.create () in
   let nat = NAT.create () in
   let policy = Policy.create endpoints nat () in
-  let disp = Dispatcher.create endpoints policy nat in
+  let disp = Dispatcher.create endpoints nat policy in
   let serve_endp endp conn =
     let () = Lwt.async (fun () -> Local.initialize_if_not endp policy endpoints) in
     let in_s, push_in = Lwt_stream.create () in
