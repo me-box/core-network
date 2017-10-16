@@ -4,7 +4,6 @@ open Mirage_types_lwt
 let connector = Logs.Src.create "connector" ~doc:"Network Connector"
 module Log = (val Logs_lwt.src_log connector : Logs_lwt.LOG)
 
-let _ = Printexc.record_backtrace true
 module Ethif = Ethif.Make(Netif)
 module Arpv4 = Arpv4.Make(Ethif)(Mclock)(OS.Time)
 
@@ -110,22 +109,26 @@ module Make(N: NETWORK)(E: ETHIF)(Arp: ARP) = struct
 
   let drain_pool ipp arp cond conn =
     let open Proto in
-    let rec provision_ip () =
-      Client.recv_comm conn >>= function
-      | ACK _ | IP_DUP _ ->
-          Log.err (fun m -> m "provision ip: not IP_REQ") >>= fun () ->
-          provision_ip ()
-      | IP_REQ seq ->
-          use_ip ipp () >>= function
-          | Ok ip ->
-              Client.send_comm conn (ACK (ip, seq)) >>= fun () ->
-              Lwt_condition.signal cond ();
-              Arp.add_ip arp ip >>= fun () ->
-              Log.info (fun m -> m "%s used ip %a" !_interface pp_ip ip) >>= fun () ->
-              provision_ip ()
-          | Error () ->
-              Log.warn (fun m -> m "not enough ip in pool! drop req %ld" seq) >>= fun () ->
-              provision_ip () in
+    let serv_ip_req () =
+      let rec provision_ip () =
+        Client.recv_comm conn >>= function
+        | ACK _ | IP_DUP _ ->
+            Log.err (fun m -> m "provision ip: not IP_REQ") >>= fun () ->
+            provision_ip ()
+        | IP_REQ seq ->
+            use_ip ipp () >>= function
+            | Ok ip ->
+                Client.send_comm conn (ACK (ip, seq)) >>= fun () ->
+                Lwt_condition.signal cond ();
+                Arp.add_ip arp ip >>= fun () ->
+                Log.info (fun m -> m "%s used ip %a" !_interface pp_ip ip) >>= fun () ->
+                provision_ip ()
+            | Error () ->
+                Log.warn (fun m -> m "not enough ip in pool! drop req %ld" seq) >>= fun () ->
+                provision_ip () in
+      Lwt.catch provision_ip (function
+        | Lwt_stream.Empty -> Lwt.return_unit
+        | exn -> Lwt.fail exn) in
 
     let delete_used arp ip =
       Client.send_comm conn (IP_DUP ip) >>= fun () ->
@@ -135,7 +138,7 @@ module Make(N: NETWORK)(E: ETHIF)(Arp: ARP) = struct
       Lwt_unix.sleep _detect_duplicates_sleep >>= fun () ->
       detect_dup_loop () in
 
-    provision_ip () <&> detect_dup_loop ()
+    serv_ip_req () <&> detect_dup_loop ()
 
 
   let maintain_ipp arp conn endp =
@@ -165,8 +168,7 @@ module Make(N: NETWORK)(E: ETHIF)(Arp: ARP) = struct
          if is_ipv4_multicast buf
          then Lwt.return_unit
          else
-         Proto.Client.send_pkt conn buf
-         (*>>= fun () -> hexdump_buf_debug "to_bridge" buf*))
+         Proto.Client.send_pkt conn buf)
       (fun e ->
          let msg = Printf.sprintf "to_bridge err: %s" @@ Printexc.to_string e in
          Log.err (fun m -> m "%s" msg) >>= fun () ->
@@ -174,25 +176,28 @@ module Make(N: NETWORK)(E: ETHIF)(Arp: ARP) = struct
 
 
   let rec from_bridge eth arp conn =
-    Proto.Client.recv_pkt conn >>= fun buf ->
+    Lwt.catch (fun () ->
+        Proto.Client.recv_pkt conn >>= fun buf ->
 
-    let dst_ipaddr = Cstruct.BE.get_uint32 buf 16 |> Ipaddr.V4.of_int32 in
-    Arp.query arp dst_ipaddr >>= function
-    | Ok destination ->
-        let eth_hd =
-          let source = E.mac eth in
-          let ethertype = Ethif_wire.IPv4 in
-          Ethif_packet.(Marshal.make_cstruct {source; destination; ethertype})
-        in
-        let buf = Cstruct.append eth_hd buf in
-        (E.write eth buf >>= function
-          | Ok () ->
-              from_bridge eth arp conn
-          | Error e ->
-              Log.err (fun m -> m "%s from bridge E.write: %a" !_interface E.pp_error e)
-              >>= fun () -> from_bridge eth arp conn)
-    | Error e ->
-        Log.err (fun m -> m "from bridge Arp.query: %a" Arp.pp_error e)
+        let dst_ipaddr = Cstruct.BE.get_uint32 buf 16 |> Ipaddr.V4.of_int32 in
+        Arp.query arp dst_ipaddr >>= function
+        | Ok destination ->
+            let eth_hd =
+              let source = E.mac eth in
+              let ethertype = Ethif_wire.IPv4 in
+              Ethif_packet.(Marshal.make_cstruct {source; destination; ethertype})
+            in
+            let buf = Cstruct.append eth_hd buf in
+            (E.write eth buf >>= function
+              | Ok () ->
+                  from_bridge eth arp conn
+              | Error e ->
+                  Log.err (fun m -> m "%s from bridge E.write: %a" !_interface E.pp_error e)
+                  >>= fun () -> from_bridge eth arp conn)
+        | Error e ->
+            Log.err (fun m -> m "from bridge Arp.query: %a" Arp.pp_error e)) (function
+      | Lwt_stream.Empty -> Lwt.return_unit
+      | exn -> Lwt.fail exn)
 
 
   let forward_pkt nf eth arp conn endp =
@@ -207,47 +212,40 @@ module Make(N: NETWORK)(E: ETHIF)(Arp: ARP) = struct
         | Ok () ->
             Log.info (fun m -> m "to_bridge ok: %s" @@ Proto.endp_to_string endp)
         | Error e ->
-            Log.err (fun m -> m "to_bridge err: %a" N.pp_error e) >>= aux in
-      aux () in
+            Log.err (fun m -> m "to_bridge err: %a" N.pp_error e) in
+      aux ()
+    in
 
     Lwt.pick [
       to_bridge eth arp conn;
-      from_bridge eth arp conn;
-    ]
+      from_bridge eth arp conn;]
 
-
-  let start ?(socket_path="/var/tmp/bridge") nf eth arp endp =
+  let start nf eth arp conn endp () =
     let () = _interface := endp.Proto.interface in
-    Proto.Client.connect socket_path endp >>= function
-    | Ok conn ->
-        Lwt.pick [
-          maintain_ipp arp conn endp;
-          forward_pkt nf eth arp conn endp;
-        ] >>= fun () ->
-        Proto.Client.disconnect conn
-    | Error (`Msg msg) ->
-        Log.err (fun m -> m "can't connect to %s: %s" socket_path msg)
+    Lwt.pick [
+      maintain_ipp arp conn endp;
+      forward_pkt nf eth arp conn endp;]
 
 end
 
+let socket_path = "/var/tmp/bridge"
 
-let start dev addr =
-  let t () =
-    Netif.connect dev >>= fun net ->
-    let mtu = Netif.mtu net in
-    Mclock.connect () >>= fun mclock ->
-    Ethif.connect ~mtu net >>= fun ethif ->
-    Arpv4.connect ethif mclock >>= fun arp ->
-    let network, ip = Ipaddr.V4.Prefix.of_address_string_exn addr in
-    let module M = Make(Netif)(Ethif)(Arpv4) in
-    let mac = Ethif.mac ethif in
-    let netmask = Ipaddr.V4.Prefix.bits network in
-    let endp = Proto.create_endp dev mac mtu ip netmask in
-    M.start net ethif arp endp
-  in
-  Lwt.async (fun () ->
-      Lwt.finalize (fun () ->
-          Lwt.catch (fun () -> t ()) (fun exn ->
-              Log.err (fun m -> m "connector err: %s" (Printexc.to_string exn))))
-        (fun () ->
-           Log.warn (fun m -> m "connector on [%s/%s] exited!" dev addr)))
+let create dev addr =
+  let network, ip = Ipaddr.V4.Prefix.of_address_string_exn addr in
+  let netmask = Ipaddr.V4.Prefix.bits network in
+  Netif.connect dev >>= fun net ->
+  let mtu = Netif.mtu net in
+  let mac = Netif.mac net in
+  let endp = Proto.create_endp dev mac mtu ip netmask in
+  Proto.Client.connect socket_path endp >>= function
+  | Ok conn ->
+      Mclock.connect () >>= fun mclock ->
+      Ethif.connect ~mtu net >>= fun ethif ->
+      Arpv4.connect ethif mclock >>= fun arp ->
+      let module M = Make(Netif)(Ethif)(Arpv4) in
+      Lwt.return_ok (conn, M.start net ethif arp conn endp)
+  | Error (`Msg msg) ->
+      Log.err (fun m -> m "can't connect to %s: %s" socket_path msg) >>= fun () ->
+      Lwt.return_error ()
+
+let destroy conn = Proto.Client.disconnect conn

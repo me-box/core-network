@@ -103,30 +103,26 @@ let send typ oc buf =
       Lwt_io.write oc (Cstruct.to_string @@ Cstruct.sub hd 0 sizeof_hd) >>= fun () ->
       Lwt_io.write oc (Cstruct.to_string buf) >>= fun () ->
       Lwt_io.flush oc) (function
-    | Unix.(Unix_error (EBADF, _, _)) -> Log.err (fun m -> m "EBADF of typ %d len %d" typ len)
+    | Unix.(Unix_error (EBADF, _, _)) as exn ->
+        Log.err (fun m -> m "EBADF of typ %d len %d" typ len) >>= fun () ->
+        Lwt.fail exn
     | exn -> Lwt.fail exn)
 
 let recv ic =
-  Lwt.catch (fun () ->
-      let hd = Bytes.create sizeof_hd in
-      Lwt_io.read_into_exactly ic hd 0 sizeof_hd >>= fun () ->
-      let hd = Cstruct.of_bytes hd in
-      let len = Cstruct.BE.get_uint16 hd 0 in
-      let typ = Cstruct.get_uint8 hd 2 in
-      let buf = Bytes.create len in
-      Lwt_io.read_into_exactly ic buf 0 len >>= fun () ->
-      (match typ with
-      | 0 -> `PKT (Cstruct.of_bytes buf)
-      | 1 -> `COMM (unmarshal_command (Cstruct.of_bytes buf))
-      | _ -> assert false)
-      |> Lwt.return) (function
-    | End_of_file ->
-        Log.err (fun m -> m "ic closed!") >>= fun () ->
-        Lwt.fail End_of_file
-    | Unix.(Unix_error (EBADF, _, _)) as exn ->
-        Log.err (fun m -> m "EBADF in recv") >>= fun () ->
-        Lwt.fail exn
-    | exn -> Lwt.fail exn)
+  try
+    let hd = Bytes.create sizeof_hd in
+    Lwt_io.read_into_exactly ic hd 0 sizeof_hd >>= fun () ->
+    let hd = Cstruct.of_bytes hd in
+    let len = Cstruct.BE.get_uint16 hd 0 in
+    let typ = Cstruct.get_uint8 hd 2 in
+    let buf = Bytes.create len in
+    Lwt_io.read_into_exactly ic buf 0 len >>= fun () ->
+    (match typ with
+    | 0 -> `PKT (Cstruct.of_bytes buf)
+    | 1 -> `COMM (unmarshal_command (Cstruct.of_bytes buf))
+    | _ -> assert false)
+    |> Lwt.return
+  with exn -> Lwt.fail exn
 
 
 let split_streams in_ch =
@@ -149,7 +145,14 @@ let split_streams in_ch =
     push_comm None;
     Lwt.return_unit in
 
-  Lwt.async (fun () -> Lwt.pick [recv_and_push (); wait_to_close ()]);
+  Lwt.async (fun () ->
+      Lwt.catch
+        (fun () ->
+           Lwt.pick [recv_and_push (); wait_to_close ()])
+        (fun exn ->
+           if Lwt_stream.is_closed pkt_s && Lwt_stream.is_closed comm_s
+           then Lwt.return_unit
+           else Log.err (fun m -> m "split_streams async err: %s" (Printexc.to_string exn))));
   (pkt_s, comm_s, close)
 
 
@@ -219,6 +222,7 @@ module Server = struct
       Lwt_unix.accept fd >>= fun (client_fd, _) ->
       Lwt.async (fun () ->
           let endp_ptr = ref None in
+          let close_ptr = ref None in
           Lwt.catch (fun () ->
               Lwt.finalize (fun () ->
                   let ic = Lwt_io.(of_fd ~mode:input client_fd) in
@@ -228,7 +232,9 @@ module Server = struct
                   Lwt_io.read_into_exactly ic endp_buf 0 sizeof_endp >>= fun () ->
                   let endp, _ = unmarshal_endp @@ Cstruct.of_bytes endp_buf in
                   let () = endp_ptr := Some endp in
-                  let pkt_s, comm_s, _ = split_streams ic in
+
+                  let pkt_s, comm_s, close = split_streams ic in
+                  let () = close_ptr := Some close in
                   cb endp (pkt_s, comm_s, oc)) (fun () ->
                   Log.warn (fun m -> m "server about to close connection!") >>= (fun () ->
                   match !endp_ptr with
@@ -237,9 +243,12 @@ module Server = struct
                       Log.warn (fun m -> m "client endp to close: %s" (endp_to_string endp))) >>= fun () ->
                   Lwt_unix.close client_fd))
             (function
-            | End_of_file ->
+            | End_of_file | Unix.(Unix_error (EBADF, _, _)) ->
                 let endp_info = match !endp_ptr with None -> "" | Some e -> endp_to_string e in
-                Log.info (fun m -> m "client %s closes connection!" endp_info)
+                Log.info (fun m -> m "closed connection from %s" endp_info) >>= fun () ->
+                (match !close_ptr with
+                | Some close -> Lwt.return @@ Lwt.wakeup close ()
+                | None -> Lwt.return_unit)
             | e ->
                 Log.err (fun m -> m "Proto.Server.listen accept err: %s" @@ Printexc.to_string e)));
       loop_accept fd

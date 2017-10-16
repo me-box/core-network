@@ -381,7 +381,9 @@ module Endpoints = struct
 
 
   let register_endpoint t endp conn push =
-    Lwt.async (fun () -> comm_monitor t conn);
+    Lwt.async (fun () -> Lwt.catch (fun () -> comm_monitor t conn) (function
+      | Lwt_stream.Empty -> Lwt.return_unit
+      | exn -> Lwt.fail exn));
     Lwt_mutex.with_lock t.mutex (fun () ->
         if not @@ EndpSet.mem endp t.endp_set then
           let endp_set = EndpSet.add endp t.endp_set in
@@ -393,6 +395,12 @@ module Endpoints = struct
           Lwt.return_unit
         else Lwt.return_unit)
 
+  let cancel_endpoint t endp =
+    Lwt_mutex.with_lock t.mutex (fun () ->
+        t.endp_set <- EndpSet.remove endp t.endp_set;
+        t.connections <- EndpMap.remove endp t.connections;
+        t.push_fn <- EndpMap.remove endp t.push_fn;
+        Lwt.return_unit)
 
   let create () : t =
     let endp_set = EndpSet.empty in
@@ -798,16 +806,20 @@ end
 
 
 let rec from_endpoint endp conn push_in =
-  Proto.Server.recv_pkt conn >>= fun buf ->
-  (*hexdump_buf_debug "from_endpoint" buf >>= fun () ->*)
-  Frame.parse_ipv4_pkt buf |> function
-  | Ok fr ->
-      Log.debug (fun m -> m "from endpoint %s: %s (len:%d)" endp.Proto.interface (Frame.fr_info fr) (Cstruct.len buf)) >>= fun () ->
-      push_in @@ Some (buf, fr);
-      from_endpoint endp conn push_in
-  | Error (`Msg msg) ->
-      Log.warn (fun m -> m "%s err parsing incoming pkt %s: DROP" endp.Proto.interface msg) >>= fun () ->
-      from_endpoint endp conn push_in
+  Lwt.catch (fun () ->
+      Proto.Server.recv_pkt conn >>= fun buf ->
+      (*hexdump_buf_debug "from_endpoint" buf >>= fun () ->*)
+      Frame.parse_ipv4_pkt buf |> function
+      | Ok fr ->
+          Log.debug (fun m -> m "from endpoint %s: %s (len:%d)" endp.Proto.interface (Frame.fr_info fr) (Cstruct.len buf)) >>= fun () ->
+          push_in @@ Some (buf, fr);
+          from_endpoint endp conn push_in
+      | Error (`Msg msg) ->
+          Log.warn (fun m -> m "%s err parsing incoming pkt %s: DROP" endp.Proto.interface msg) >>= fun () ->
+          from_endpoint endp conn push_in
+    ) (function
+    | Lwt_stream.Empty -> Lwt.return_unit
+    | exn -> Lwt.fail exn)
 
 
 let rec to_endpoint endp conn out_s =
@@ -861,7 +873,8 @@ let main path logs =
       dispatch endp in_s;
       from_endpoint endp conn push_in;
       to_endpoint endp conn out_s
-    ]
+    ] >>= fun () ->
+    Endpoints.cancel_endpoint endpoints endp
   in
 
   Proto.Server.listen server serve_endp >>= fun () ->
@@ -889,6 +902,8 @@ let cmd =
   Term.info "bridge" ~doc ~man:[]
 
 let () =
+  Printexc.record_backtrace true;
+  async_exception ();
   match Term.eval cmd with
   | `Ok t -> Lwt_main.run t
   | _ -> exit 1

@@ -35,19 +35,19 @@ let existed_intf t =
       with Not_found -> acc) [] lines
   |> fun existed ->
   Log.info (fun m -> m "found %d existed phy interfaces" (List.length existed)) >>= fun () ->
-  (*Lwt_list.iter_p (fun (dev, addr) ->
-      create_connector dev addr >>= fun () ->
-      start_connector dev addr >>= (function
-        | Ok (Unix.WEXITED 0) -> Lwt.return @@ Hashtbl.add t addr dev
-        | _ -> remove_connector dev)) existed*)
+
   Lwt_list.iter_p (fun (dev, addr) ->
-      Hashtbl.add t addr dev;
-      Lwt.return @@ Connector.start dev addr) existed
+      Connector.create dev addr >>= function
+      | Ok (conn, start) ->
+          Hashtbl.add t addr (dev, conn);
+          Lwt.async start;
+          Lwt.return_unit
+      | Error () -> Lwt.return_unit) existed
 
 
 
 let start () =
-  (* (ip, interface name) Hashtbl.t *)
+  (* (ip, interface name * client connection) Hashtbl.t *)
   let connectors = Hashtbl.create 7 in
 
   let command = "ip", [|"ip"; "monitor"; "address"|] in
@@ -60,23 +60,18 @@ let start () =
         match intf_event l with
         | None ->  m ()
         | Some (`Up (dev, addr)) ->
-            Log.debug (fun m -> m "link up: %s" l) >>= fun () ->
             Log.info (fun m -> m "link up: %s %s" dev addr) >>= fun () ->
-            (*create_connector dev addr >>= fun () ->
-            start_connector dev addr >>= (function
-              | Ok (Unix.WEXITED 0) ->
-                  Hashtbl.add connectors addr dev;
-                  m ()
-              | _ -> remove_connector dev >>= m)*)
-            Hashtbl.add connectors addr dev;
-            Lwt.return @@ Connector.start dev addr >>= fun () ->
+            Connector.create dev addr >>= fun connector ->
+            if Rresult.R.is_ok connector then begin
+              let conn, start = Rresult.R.get_ok connector in
+              Hashtbl.add connectors addr (dev, conn);
+              Lwt.async start end;
             m ()
         | Some (`Down addr) ->
-            let dev = Hashtbl.find connectors addr in
-            Log.debug (fun m -> m "link down: %s" l) >>= fun () ->
+            let dev, conn = Hashtbl.find connectors addr in
             Log.info (fun m -> m "link down: %s %s" dev addr) >>= fun () ->
             Hashtbl.remove connectors addr;
-            (*remove_connector dev >>= fun () ->*)
+            Connector.destroy conn >>= fun () ->
             m ()
   in
 
