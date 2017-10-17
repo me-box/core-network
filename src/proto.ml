@@ -56,6 +56,7 @@ type command =
   | IP_REQ of int32
   | IP_DUP of Ipaddr.V4.t
   | ACK of (Ipaddr.V4.t * int32)
+  | IP_RTN of Ipaddr.V4.t
 
 let sizeof_command = 1 + 4 + 4
 
@@ -72,6 +73,9 @@ let marshal_command comm buf =
       Cstruct.set_uint8 buf 0 4;
       Cstruct.blit_from_bytes (Bytes.of_string @@ Ipaddr.V4.to_bytes ip) 0 buf 1 4;
       Cstruct.BE.set_uint32 buf (1 + 4) seq
+  | IP_RTN rtn ->
+      Cstruct.set_uint8 buf 0 8;
+      Cstruct.blit_from_bytes (Bytes.of_string @@ Ipaddr.V4.to_bytes rtn) 0 buf 1 4
   end;
   Cstruct.shift buf sizeof_command
 
@@ -83,6 +87,7 @@ let unmarshal_command buf =
   | 2 -> IP_DUP (Ipaddr.V4.of_bytes_exn @@ Cstruct.(to_string @@ sub buf 1 4))
   | 4 -> ACK (Ipaddr.V4.of_bytes_exn @@ Cstruct.(to_string @@ sub buf 1 4),
               Cstruct.BE.get_uint32 buf (1 + 4))
+  | 8 -> IP_RTN (Ipaddr.V4.of_bytes_exn @@ Cstruct.(to_string @@ sub buf 1 4))
   | n -> assert false
 
 

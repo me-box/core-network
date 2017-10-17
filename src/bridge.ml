@@ -338,8 +338,8 @@ module Endpoints = struct
     | IP_DUP dup ->
         Log.warn (fun m -> m "DUPLICATE: %a!" pp_ip dup) >>= fun () ->
         comm_monitor t conn
-    | IP_REQ _ ->
-        Log.err (fun m -> m "IP_REQ from client?!") >>= fun () ->
+    | IP_REQ _ | IP_RTN _ ->
+        Log.err (fun m -> m "IP_REQ|IP_RTN from client?!") >>= fun () ->
         comm_monitor t conn
 
   let enqueue_req t id u =
@@ -378,6 +378,15 @@ module Endpoints = struct
             Log.warn (fun m -> m "claim_fake_ip time out! retry...") >>= fun () ->
             dequeue_req t id >>= fun () ->
             claim_fake_dst t ip
+
+  let forfeit_fake_dst t ip =
+    endp_of_ip t ip >>= function
+    | None ->
+        Log.warn (fun m -> m "endp for %a destroied already?" pp_ip ip)
+    | Some endp ->
+        let comm = Proto.IP_RTN ip in
+        let conn = EndpMap.find endp t.connections in
+        Proto.Server.send_comm conn comm
 
 
   let register_endpoint t endp conn push =
@@ -539,10 +548,12 @@ module Policy = struct
         let translation = NAT.get_translation t.nat handle in
         let src, dst = handle in
         forbidden_transport t src dst >>= fun () ->
+        Endpoints.forfeit_fake_dst t.endpoints dst >>= fun () ->
         NAT.remove_rule t.nat handle >>= fun () ->
         if List.length translation <> 0 then
           let dst', src' = List.hd translation in
           forbidden_transport t src' dst' >>= fun () ->
+          Endpoints.forfeit_fake_dst t.endpoints dst' >>= fun () ->
           NAT.remove_rule t.nat (src', dst')
         else Lwt.return_unit) handles >>= fun () ->
     Log.info (fun m -> m "Policy.disconnect %s" n)

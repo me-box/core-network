@@ -27,7 +27,7 @@ module Make(N: NETWORK)(E: ETHIF)(Arp: ARP) = struct
 
   let put_ip ipp ip =
     Lwt_mutex.with_lock ipp.mutex (fun () ->
-        if not @@ List.mem ip ipp.free_ips then ipp.free_ips <- ip :: ipp.free_ips;
+        if not @@ List.mem ip ipp.free_ips then ipp.free_ips <- ipp.free_ips @ [ip];
         Lwt.return_unit) >>= fun () ->
     Log.debug (fun m -> m "%s got free ip %a" !_interface pp_ip ip)
 
@@ -39,9 +39,16 @@ module Make(N: NETWORK)(E: ETHIF)(Arp: ARP) = struct
         ipp.free_ips <- (List.tl ipp.free_ips);
         ipp.used_ips <- ip :: ipp.used_ips;
         Lwt.return (Ok ip))
-
     >>= fun ip ->
     Lwt.return ip
+
+
+  let return_ip ipp ip =
+    Lwt_mutex.with_lock ipp.mutex (fun () ->
+        if List.mem ip ipp.used_ips then begin
+          ipp.used_ips <- List.filter (fun ip' -> 0 <> Ipaddr.V4.compare ip' ip) ipp.used_ips;
+          ipp.free_ips <- ip :: ipp.free_ips end;
+        Lwt.return_unit)
 
 
   let delete_duplicated ~delete_used ip ipp cond =
@@ -68,7 +75,7 @@ module Make(N: NETWORK)(E: ETHIF)(Arp: ARP) = struct
 
   let detect_duplicates ~delete_used ipp arp cond =
     Lwt_mutex.with_lock ipp.mutex (fun () ->
-        Lwt.return @@ (ipp.free_ips @ ipp.used_ips))
+        Lwt.return ipp.used_ips)
     >>= Lwt_list.iter_p (fun ip ->
         Arp.query arp ip >>= function
         | Ok _ ->
@@ -99,7 +106,7 @@ module Make(N: NETWORK)(E: ETHIF)(Arp: ARP) = struct
             put_ip ipp candidate >>= fun () ->
             count_and_put ()
       else
-      Log.info (fun m -> m "%s pool full of %d free IPs" interface _free_ip_cnt) >>= fun () ->
+      Log.info (fun m -> m "%s pool full of %d free IPs" interface cnt) >>= fun () ->
       Lwt_condition.wait cond >>= fun () ->
       Log.info (fun m -> m "%s free IP used, start collecting new..." interface) >>= fun () ->
       count_and_put ()
@@ -114,6 +121,10 @@ module Make(N: NETWORK)(E: ETHIF)(Arp: ARP) = struct
         Client.recv_comm conn >>= function
         | ACK _ | IP_DUP _ ->
             Log.err (fun m -> m "provision ip: not IP_REQ") >>= fun () ->
+            provision_ip ()
+        | IP_RTN rtn ->
+            return_ip ipp rtn >>= fun () ->
+            Lwt_condition.signal cond ();
             provision_ip ()
         | IP_REQ seq ->
             use_ip ipp () >>= function
