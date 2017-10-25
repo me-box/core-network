@@ -12,14 +12,21 @@ module Make(N: NETWORK)(E: ETHIF)(Arp: ARP) = struct
   type ip_pool = {
     mutable free_ips: Ipaddr.V4.t list;
     mutable used_ips: Ipaddr.V4.t list;
+    probes: (Ipaddr.V4.t, (unit, unit) result Lwt.u) Hashtbl.t;
     mutex: Lwt_mutex.t;
   }
 
   let _free_ip_cnt = 5
-  let _detect_duplicates_sleep = 30. (* s *)
+  let _detect_duplicates_sleep = 60. (* s *)
+  let _probe_timeout = 0.5
   let _interface = ref ""
 
   let pp_ip = Ipaddr.V4.pp_hum
+
+  let create_ipp () =
+    let probes = Hashtbl.create 7 in
+    let mutex = Lwt_mutex.create () in
+    {free_ips = []; used_ips = []; probes; mutex}
 
   let count_free ipp =
     Lwt_mutex.with_lock ipp.mutex (fun () ->
@@ -51,6 +58,36 @@ module Make(N: NETWORK)(E: ETHIF)(Arp: ARP) = struct
         Lwt.return_unit)
 
 
+  let send_probe ipp eth arp ip =
+    let probe = Arpv4_packet.{
+      op = Arpv4_wire.Request;
+      sha = E.mac eth;
+      spa = Arp.get_ips arp |> List.hd;
+      tha = Macaddr.broadcast;
+      tpa = ip;} in
+    let eth_hd = Ethif_packet.{
+      source = E.mac eth;
+      destination = Macaddr.broadcast;
+      ethertype = Ethif_wire.ARP;} in
+    let buf = Cstruct.concat [
+        Ethif_packet.Marshal.make_cstruct eth_hd;
+        Arpv4_packet.Marshal.make_cstruct probe;] in
+
+    let found, u = Lwt.wait () in
+    Lwt_mutex.with_lock ipp.mutex (fun () ->
+        Lwt.return @@ Hashtbl.add ipp.probes ip u) >>= fun () ->
+    E.write eth buf >>= (function
+      | Ok () -> Lwt.pick [found; Lwt_unix.sleep _probe_timeout >>= Lwt_result.fail]
+      | Error _ -> Lwt_result.fail ())
+    >>= function
+    | Ok () ->
+        Log.info (fun m -> m "found ip %a on network" pp_ip ip)
+        |> Lwt_result.ok
+    | Error () ->
+        Lwt_mutex.with_lock ipp.mutex (fun () ->
+            Lwt_result.fail @@ Hashtbl.remove ipp.probes ip)
+
+
   let delete_duplicated ~delete_used ip ipp cond =
     Lwt_mutex.with_lock ipp.mutex (fun () ->
         let free_ips' =
@@ -73,18 +110,17 @@ module Make(N: NETWORK)(E: ETHIF)(Arp: ARP) = struct
     else Lwt.return_unit
 
 
-  let detect_duplicates ~delete_used ipp arp cond =
+  let detect_duplicates ~delete_used ipp eth arp cond =
     Lwt_mutex.with_lock ipp.mutex (fun () ->
         Lwt.return ipp.used_ips)
     >>= Lwt_list.iter_p (fun ip ->
-        Arp.query arp ip >>= function
-        | Ok _ ->
-            Log.warn (fun m -> m "duplicate detected: %a" Ipaddr.V4.pp_hum ip)
-            >>= fun () ->
+        send_probe ipp eth arp ip >>= function
+        | Ok () ->
+            Log.warn (fun m -> m "duplicate detected: %a" Ipaddr.V4.pp_hum ip) >>= fun () ->
             delete_duplicated ~delete_used ip ipp cond
-        | Error _ -> Lwt.return_unit)
+        | Error () -> Lwt.return_unit)
 
-  let populate_pool ipp arp cond Proto.({interface; ip_addr; netmask}) =
+  let populate_pool ipp eth arp cond Proto.({interface; ip_addr; netmask}) =
     let network =
       let prefix = Ipaddr.V4.Prefix.make netmask ip_addr in
       Ipaddr.V4.Prefix.network prefix in
@@ -100,9 +136,9 @@ module Make(N: NETWORK)(E: ETHIF)(Arp: ARP) = struct
       count_free ipp >>= fun cnt ->
       if cnt < _free_ip_cnt then
         let candidate = next () in
-        Arp.query arp candidate >>= function
-        | Ok _ -> count_and_put ()
-        | Error _ ->
+        send_probe ipp eth arp candidate >>= function
+        | Ok () -> count_and_put ()
+        | Error () ->
             put_ip ipp candidate >>= fun () ->
             count_and_put ()
       else
@@ -114,7 +150,7 @@ module Make(N: NETWORK)(E: ETHIF)(Arp: ARP) = struct
     count_and_put ()
 
 
-  let drain_pool ipp arp cond conn =
+  let drain_pool ipp eth arp cond conn =
     let open Proto in
     let serv_ip_req () =
       let rec provision_ip () =
@@ -145,19 +181,16 @@ module Make(N: NETWORK)(E: ETHIF)(Arp: ARP) = struct
       Client.send_comm conn (IP_DUP ip) >>= fun () ->
       Arp.remove_ip arp ip in
     let rec detect_dup_loop () =
-      detect_duplicates ~delete_used:(delete_used arp) ipp arp cond >>= fun () ->
+      detect_duplicates ~delete_used:(delete_used arp) ipp eth arp cond >>= fun () ->
       Lwt_unix.sleep _detect_duplicates_sleep >>= fun () ->
       detect_dup_loop () in
 
     serv_ip_req () <&> detect_dup_loop ()
 
 
-  let maintain_ipp arp conn endp =
-    let ipp = {free_ips = []; used_ips = []; mutex = Lwt_mutex.create ()} in
+  let maintain_ipp ipp eth arp conn endp =
     let cond = Lwt_condition.create () in
-    Lwt_unix.sleep 1.0 >>= fun () ->
-    populate_pool ipp arp cond endp <&> drain_pool ipp arp cond conn
-
+    populate_pool ipp eth arp cond endp <&> drain_pool ipp eth arp cond conn
 
 
   let hexdump_buf_debug desp buf =
@@ -211,14 +244,26 @@ module Make(N: NETWORK)(E: ETHIF)(Arp: ARP) = struct
       | exn -> Lwt.fail exn)
 
 
-  let forward_pkt nf eth arp conn endp =
+  let intercept_probe_reply ipp arp buf =
+    let open Arpv4_packet in
+    Lwt_mutex.with_lock ipp.mutex (fun () ->
+    match Unmarshal.of_cstruct buf with
+    | Ok {op = Arpv4_wire.Reply; spa = ip} when Hashtbl.mem ipp.probes ip ->
+        let u = Hashtbl.find ipp.probes ip in
+        Lwt.wakeup u (Ok ());
+        Lwt.return @@ Hashtbl.remove ipp.probes ip
+    | _ -> Lwt.return_unit)
+    >>= fun () -> Arp.input arp buf
+
+
+  let forward_pkt ipp nf eth arp conn endp =
     let to_bridge eth arp conn  =
       (*sendint ip packet to bridge, not ethernet frame*)
       let ipv4 = to_bridge conn in
-      let arpv4 = Arp.input arp in
+      let arpv4 = intercept_probe_reply ipp arp in
       let ipv6 = drop_pkt in
       let fn = E.input ~arpv4 ~ipv4 ~ipv6 eth in
-      let rec aux () =
+      let aux () =
         N.listen nf fn >>= function
         | Ok () ->
             Log.info (fun m -> m "to_bridge ok: %s" @@ Proto.endp_to_string endp)
@@ -233,9 +278,10 @@ module Make(N: NETWORK)(E: ETHIF)(Arp: ARP) = struct
 
   let start nf eth arp conn endp () =
     let () = _interface := endp.Proto.interface in
+    let ipp = create_ipp () in
     Lwt.pick [
-      maintain_ipp arp conn endp;
-      forward_pkt nf eth arp conn endp;]
+      maintain_ipp ipp eth arp conn endp;
+      forward_pkt ipp nf eth arp conn endp;]
 
 end
 
@@ -253,6 +299,7 @@ let create dev addr =
       Mclock.connect () >>= fun mclock ->
       Ethif.connect ~mtu net >>= fun ethif ->
       Arpv4.connect ethif mclock >>= fun arp ->
+      Arpv4.set_ips arp [ip] >>= fun () ->
       let module M = Make(Netif)(Ethif)(Arpv4) in
       Lwt.return_ok (conn, M.start net ethif arp conn endp)
   | Error (`Msg msg) ->
