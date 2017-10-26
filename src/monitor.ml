@@ -1,6 +1,6 @@
 open Lwt.Infix
 
-let monitor = Logs.Src.create "monitor" ~doc:"Connector monitor"
+let monitor = Logs.Src.create "monitor" ~doc:"Interface monitor"
 module Log = (val Logs_lwt.src_log monitor : Logs_lwt.LOG)
 
 let intf_event l =
@@ -22,7 +22,7 @@ let intf_event l =
   with Not_found -> None
 
 
-let existed_intf t =
+let existed_intf interfaces push_intf =
   let command = "ip", [|"ip"; "address"; "show"|] in
   let st = Lwt_process.pread_lines command in
   Lwt_stream.to_list st >>= fun lines ->
@@ -36,45 +36,41 @@ let existed_intf t =
   |> fun existed ->
   Log.info (fun m -> m "found %d existed phy interfaces" (List.length existed)) >>= fun () ->
 
-  Lwt_list.iter_p (fun (dev, addr) ->
-      Connector.create dev addr >>= function
-      | Ok (conn, start) ->
-          Hashtbl.add t addr (dev, conn);
-          Lwt.async start;
-          Lwt.return_unit
-      | Error () -> Lwt.return_unit) existed
+  Lwt_list.iter_p (fun (dev, cidr_addr) ->
+      Intf.create ~dev ~cidr:cidr_addr >>= fun (t, start_t) ->
+      push_intf (Some (t, start_t));
+      Hashtbl.add interfaces cidr_addr dev;
+      Lwt.return_unit) existed
 
 
+type starter = unit -> unit Lwt.t
 
-let start () =
-  (* (ip, interface name * client connection) Hashtbl.t *)
-  let connectors = Hashtbl.create 7 in
-
+let create () =
+  let interfaces = Hashtbl.create 7 in
+  let intf_st, push_intf = Lwt_stream.create () in
   let command = "ip", [|"ip"; "monitor"; "address"|] in
   let stm = Lwt_process.pread_lines command in
-  let rec m () =
+  let rec monitor_lp () =
     Lwt_stream.get stm >>= function
     | None ->
         Lwt_io.printf "closed!"
     | Some l ->
-        match intf_event l with
-        | None ->  m ()
-        | Some (`Up (dev, addr)) ->
-            Log.info (fun m -> m "link up: %s %s" dev addr) >>= fun () ->
-            Connector.create dev addr >>= fun connector ->
-            if Rresult.R.is_ok connector then begin
-              let conn, start = Rresult.R.get_ok connector in
-              Hashtbl.add connectors addr (dev, conn);
-              Lwt.async start end;
-            m ()
-        | Some (`Down addr) ->
-            let dev, conn = Hashtbl.find connectors addr in
-            Log.info (fun m -> m "link down: %s %s" dev addr) >>= fun () ->
-            Hashtbl.remove connectors addr;
-            Connector.destroy conn >>= fun () ->
-            m ()
+        (match intf_event l with
+        | None -> Lwt.return_unit
+        | Some (`Up (dev, cidr_addr)) ->
+            Log.info (fun m -> m "link up: %s %s" dev cidr_addr) >>= fun () ->
+            Intf.create ~dev ~cidr:cidr_addr >>= fun (t, start_t) ->
+            push_intf (Some (t, start_t));
+            Hashtbl.add interfaces cidr_addr dev;
+            Lwt.return_unit
+        | Some (`Down cidr_addr) ->
+            let dev = Hashtbl.find interfaces cidr_addr in
+            Log.info (fun m -> m "link down: %s %s" dev cidr_addr) >>= fun () ->
+            Hashtbl.remove interfaces cidr_addr;
+            Lwt.return_unit)
+        >>= fun () -> monitor_lp ()
   in
 
-  existed_intf connectors >>= fun () ->
+  existed_intf interfaces push_intf >>= fun () ->
   Log.info (fun m -> m "start monitoring for phy intf event...") >>= fun () ->
-  m ()
+  Lwt.return (intf_st, monitor_lp)
