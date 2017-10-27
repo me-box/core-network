@@ -20,6 +20,7 @@ type t = {
   dev : string;
   ip: Ipaddr.V4.t;
   network: Ipaddr.V4.Prefix.t;
+  mtu: int;
   recv_st: Cstruct.t Lwt_stream.t;
   send_push: Cstruct.t option -> unit;
   acquire_fake_ip: unit -> Ipaddr.V4.t Lwt.t;
@@ -114,12 +115,13 @@ type starter = unit -> unit Lwt.t
 let create ~dev ~cidr =
   let network, ip = Ipaddr.V4.Prefix.of_address_string_exn cidr in
   init_stack dev ip >>= fun (net, eth, arp) ->
+  let mtu = Netif.mtu net in
   let recv_st, recv_push = Lwt_stream.create () in
   let send_st, send_push = Lwt_stream.create () in
   let acquire_fake_ip, release_fake_ip = fake_ip_op arp ip network in
   let fake_ips () = Arpv4.get_ips arp |> lt_remove ip in
   let t = {
-    dev; ip; network;
+    dev; ip; network; mtu;
     recv_st; send_push;
     acquire_fake_ip; release_fake_ip; fake_ips} in
   Lwt.return (t, start_intf dev net eth arp recv_push send_st)

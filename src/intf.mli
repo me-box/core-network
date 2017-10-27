@@ -2,6 +2,7 @@ type t = {
   dev : string;
   ip: Ipaddr.V4.t;
   network: Ipaddr.V4.Prefix.t;
+  mtu: int;
 
   recv_st: Cstruct.t Lwt_stream.t;
   send_push: Cstruct.t option -> unit;

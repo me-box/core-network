@@ -889,7 +889,111 @@ let main path logs =
   in
 
   Proto.Server.listen server serve_endp >>= fun () ->
-  Monitor.start()
+  Monitor.create () >>= fun _ -> Lwt.return_unit
+
+
+module Pkt = struct
+  let notify_mtu_pkt ~src ~dst mtu jumbo_hd =
+    let icmp =
+      let ty = Icmpv4_wire.Destination_unreachable in
+      let subheader = Icmpv4_packet.Next_hop_mtu mtu in
+      let code = Icmpv4_wire.(unreachable_reason_to_int Would_fragment) in
+      let icmp_t = Icmpv4_packet.({ty; subheader; code}) in
+      let hd = Icmpv4_packet.Marshal.make_cstruct icmp_t ~payload:jumbo_hd in
+      Cstruct.concat [hd; jumbo_hd] in
+
+    let ip_hd =
+      let buf = Cstruct.create Ipv4_wire.sizeof_ipv4 in
+      let ip_t = Ipv4_packet.{
+        src; dst; ttl = 38;
+        proto = Marshal.protocol_to_int `ICMP; options = Cstruct.create 0} in
+      let payload_len = Cstruct.len icmp in
+      let result = Ipv4_packet.Marshal.into_cstruct ~payload_len ip_t buf in
+      assert (result = Ok ());
+      Ipv4_wire.set_ipv4_id buf (Random.int 65535);
+      Ipv4_wire.set_ipv4_csum buf 0;
+      let csum = Tcpip_checksum.ones_complement buf in
+      Ipv4_wire.set_ipv4_csum buf csum;
+      buf in
+
+    Cstruct.concat [ip_hd; icmp]
+
+end
+
+
+module Interfaces = struct
+
+  open Intf
+
+  module IntfSet = Set.Make(struct
+      type t = Intf.t
+      let compare x y = Pervasives.compare x.dev y.dev
+    end)
+
+  type t = {
+    mutable interfaces: IntfSet.t;
+    mutable intf_cache: Intf.t IpMap.t;
+  }
+
+  let intf_of_ip_exn t ip =
+    if IpMap.mem ip t.intf_cache then Lwt.return @@ IpMap.find ip t.intf_cache else
+    let found = ref None in
+    IntfSet.iter (fun intf ->
+        if !found <> None then ()
+        else if Ipaddr.V4.Prefix.mem ip intf.network then found := Some intf
+        else ()) t.interfaces;
+    match !found with
+    | None ->
+        Log.err (fun m -> m "interface not found for %a" pp_ip ip) >>= fun () ->
+        Lwt.fail Not_found
+    | Some intf ->
+        t.intf_cache <- IpMap.add ip intf t.intf_cache;
+        Lwt.return intf
+
+  let to_push t dst_ip pkt =
+    intf_of_ip_exn t dst_ip >>= fun intf ->
+    intf.send_push pkt;
+    Lwt.return_unit
+
+  let notify_mtu t src_ip mtu jumbo_hd = ()
+
+  let from_same_network t ipx ipy =
+    intf_of_ip_exn t ipx >>= fun intfx ->
+    intf_of_ip_exn t ipy >>= fun intfy ->
+    Lwt.return (intfx.dev = intfy.dev)
+
+  let acquire_fake_dst t src_ip =
+    intf_of_ip_exn t src_ip >>= fun intf ->
+    Lwt.return @@ intf.acquire_fake_ip ()
+
+  let release_fake_dst t fake_dst =
+    intf_of_ip_exn t fake_dst >>= fun intf ->
+    Lwt.return @@ intf.release_fake_ip fake_dst
+
+  let register_intf t intf dispatch_fn =
+    let rec drain_pkt () =
+      Lwt_stream.get intf.recv_st >>= function
+      | Some buf ->
+          (match Frame.parse_ipv4_pkt buf with
+          | Ok Frame.(Ipv4 {src; dst; ihl} as pkt) ->
+              if Cstruct.len buf > intf.mtu then
+                let jumbo_hd = Cstruct.sub buf 0 (ihl * 4 + 8) in
+                let mtu_notification = Pkt.notify_mtu_pkt ~src:dst ~dst:src intf.mtu jumbo_hd in
+                intf.send_push (Some mtu_notification);
+                Lwt.return_unit
+              else dispatch_fn (buf, pkt)
+          | Ok Frame.Unknown | Error _ -> Log.warn (fun m -> m "unparsable pkt from %s" intf.dev)
+          | Ok (_  as pkt) -> Log.warn (fun m -> m "not ipv4 pkt: %s" (Frame.fr_info pkt)))
+          >>= fun () -> drain_pkt ()
+      | None -> Log.warn (fun m -> m "stream from %s closed!" intf.dev) in
+    t.interfaces <- IntfSet.add intf t.interfaces;
+    Lwt.return drain_pkt
+
+  let create () =
+    let interfaces = IntfSet.empty in
+    let intf_cache = IpMap.empty in
+    {interfaces; intf_cache}
+end
 
 
 open Cmdliner
@@ -904,7 +1008,7 @@ let logs =
   let src_levels = [
     `Src "bridge",    Logs.Info;
     `Src "monitor",   Logs.Info;
-    `Src "connector", Logs.Info;] in
+    `Src "connector", Logs.Debug;] in
   Arg.(value & opt (list Utils.log_threshold) src_levels & info ["l"; "logs"] ~doc ~docv:"LEVEL")
 
 let cmd =
