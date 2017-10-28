@@ -41,9 +41,9 @@ let read_intf dev net eth arp recv_push =
   Netif.listen net listen_fn >>= function
   | Ok () -> Log.info (fun m -> m "%s disconnected!" dev)
   | Error e ->
-      Log.warn (fun m -> m "%s listen err: %a" dev Netif.pp_error e)
-      >>= fun () -> Lwt.return @@ recv_push None
-
+      Log.warn (fun m -> m "%s listen err: %a" dev Netif.pp_error e) >>= fun () ->
+      Netif.disconnect net >>= fun () ->
+      Lwt.return @@ recv_push None
 
 let rec write_intf dev eth arp send_st =
   Lwt_stream.get send_st >>= function

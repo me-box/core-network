@@ -38,39 +38,43 @@ let existed_intf interfaces push_intf =
 
   Lwt_list.iter_p (fun (dev, cidr_addr) ->
       Intf.create ~dev ~cidr:cidr_addr >>= fun (t, start_t) ->
-      push_intf (Some (t, start_t));
+      push_intf (Some (`Up (t, start_t)));
       Hashtbl.add interfaces cidr_addr dev;
       Lwt.return_unit) existed
 
 
 type starter = unit -> unit Lwt.t
 
+type intf_event = [`Up of (Intf.t * Intf.starter) | `Down of string]
+
 let create () =
   let interfaces = Hashtbl.create 7 in
   let intf_st, push_intf = Lwt_stream.create () in
+
+  existed_intf interfaces push_intf >>= fun () ->
+
   let command = "ip", [|"ip"; "monitor"; "address"|] in
   let stm = Lwt_process.pread_lines command in
   let rec monitor_lp () =
     Lwt_stream.get stm >>= function
     | None ->
-        Lwt_io.printf "closed!"
+        Lwt_io.printf "'ip monitor address' output stream closed!"
     | Some l ->
         (match intf_event l with
         | None -> Lwt.return_unit
         | Some (`Up (dev, cidr_addr)) ->
             Log.info (fun m -> m "link up: %s %s" dev cidr_addr) >>= fun () ->
             Intf.create ~dev ~cidr:cidr_addr >>= fun (t, start_t) ->
-            push_intf (Some (t, start_t));
+            push_intf (Some (`Up (t, start_t)));
             Hashtbl.add interfaces cidr_addr dev;
             Lwt.return_unit
         | Some (`Down cidr_addr) ->
             let dev = Hashtbl.find interfaces cidr_addr in
             Log.info (fun m -> m "link down: %s %s" dev cidr_addr) >>= fun () ->
             Hashtbl.remove interfaces cidr_addr;
+            push_intf (Some (`Down dev));
             Lwt.return_unit)
         >>= fun () -> monitor_lp ()
   in
 
-  existed_intf interfaces push_intf >>= fun () ->
-  Log.info (fun m -> m "start monitoring for phy intf event...") >>= fun () ->
   Lwt.return (intf_st, monitor_lp)
