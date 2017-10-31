@@ -13,6 +13,9 @@ let pp_ip = Ipaddr.V4.pp_hum
 
 module Dns_service = struct
 
+  let dns = Logs.Src.create "dns" ~doc:"Dns service"
+  module Log = (val Logs_lwt.src_log dns : Logs_lwt.LOG)
+
   let is_dns_query = let open Frame in function
     | Ipv4 { payload = Udp { dst = 53; _ }; _ }
     | Ipv4 { payload = Tcp { dst = 53; _ }; _ } -> true
@@ -28,7 +31,7 @@ module Dns_service = struct
     | _ -> Lwt.fail (Invalid_argument "Not dns query")
 
 
-  let rec try_resolve n () =
+  let try_resolve n () =
     Lwt.catch
       (fun () ->
          let open Lwt_unix in
@@ -38,27 +41,26 @@ module Dns_service = struct
          |> List.map (fun addr ->
              Unix.string_of_inet_addr addr
              |> Ipaddr.V4.of_string_exn)
-         |> fun ips -> Lwt.return @@ `Resolved (List.hd ips))
+         |> fun ips -> Lwt.return @@ `Resolved (n , List.hd ips))
       (function
-      | Not_found -> Lwt.return @@ `Later (n, try_resolve n)
+      | Not_found -> Lwt.return @@ `Later n
       | e -> Lwt.fail e)
 
 
-  let ip_of_name ?(sleep_time = 2.) n =
-    try_resolve n () >>= fun maybe_ip ->
-    let rec keep_trying = function
-    | `Later (n, to_resolve) ->
-        Log.debug (fun m -> m "to resolve %s after %fs" n sleep_time) >>= fun () ->
-        Lwt_unix.sleep sleep_time >>= fun () ->
-        to_resolve () >>= keep_trying
-    | `Resolved ip ->
-        Log.info (fun m -> m "resolved: %s %a" n pp_ip ip) >>= fun () ->
-        Lwt.return ip in
-    Log.info (fun m -> m "trying to resolve %s..." n) >>= fun () ->
-    keep_trying maybe_ip
+  let ip_of_name n =
+    let rec keep_trying n=
+      try_resolve n () >>= function
+      | `Later n ->
+          Log.info (fun m -> m "resolve %s later..." n) >>= fun () ->
+          Lwt_unix.sleep 0.3 >>= fun () ->
+          keep_trying n
+      | `Resolved (n, ip) ->
+          Log.info (fun m -> m "resolved: %s %a" n pp_ip ip) >>= fun () ->
+          Lwt.return ip in
+    Log.info (fun m -> m "try to resolve %s..." n) >>= fun () ->
+    keep_trying n
 
-
-  let to_dns_response t pkt resp =
+  let to_dns_response pkt resp =
     let open Frame in
     match pkt with
     | Ipv4 {src = dst; dst = src; payload = Udp {src = dst_port; dst = src_port; _}; _}
@@ -117,12 +119,16 @@ type pair = Ipaddr.V4.t * Ipaddr.V4.t
 
 module NAT = struct
 
+  let nat = Logs.Src.create "NAT" ~doc:"NAT among interfaces"
+  module Log = (val Logs_lwt.src_log nat : Logs_lwt.LOG)
+
   module PairMap = Map.Make(struct
       type t = pair
       let compare (xx, xy) (yx, yy) =
         let open Ipaddr.V4 in
         if compare xx yx = 0 && compare xy yy = 0 then 0
-        else compare xx yy
+        else if 0 <> compare xx yx then compare xx yx
+        else compare xy yy
     end)
 
   module IPMap = Map.Make(struct
@@ -362,12 +368,16 @@ end
 
 module Policy = struct
 
+  let policy = Logs.Src.create "policy" ~doc:"Junction Policy"
+  module Log = (val Logs_lwt.src_log policy : Logs_lwt.LOG)
+
   module IPPairSet = Set.Make(struct
       type t = pair
       let compare (xx, xy) (yx, yy) =
         let open Ipaddr.V4 in
         if compare xx yx = 0 && compare xy yy = 0 then 0
-        else compare xx yy
+        else if 0 <> compare xx yx then compare xx yx
+        else compare xy yy
     end)
 
   module DomainPairSet = Set.Make(struct
@@ -433,11 +443,13 @@ module Policy = struct
 
   let allow_transport t src_ip dst_ip =
     t.transport <- IPPairSet.add (src_ip, dst_ip) t.transport;
-    Lwt.return_unit
+    Log.info (fun m -> m "add transport %a -> %a" pp_ip src_ip pp_ip dst_ip)
+    >>= fun () -> Lwt.return_unit
 
   let forbidden_transport t src_ip dst_ip =
     t.transport <- IPPairSet.remove (src_ip, dst_ip) t.transport;
-    Lwt.return_unit
+    Log.info (fun m -> m "removetransport %a -> %a" pp_ip src_ip pp_ip dst_ip)
+    >>= fun () -> Lwt.return_unit
 
 
   let process_pair_connection t nx ny =
@@ -723,15 +735,14 @@ module Dispatcher = struct
       Log.debug (fun m -> m "Dispatcher: a dns query from %a" pp_ip src_ip) >>= fun () ->
       let resolve = Policy.is_authorized_resolve t.policy src_ip in
       Dns_service.process_dns_query ~resolve pkt >>= fun resp ->
-      let resp = Dns_service.to_dns_response t pkt resp in
+      let resp = Dns_service.to_dns_response pkt resp in
       Interfaces.to_push t.interfaces dst_ip (fst resp)
     else if Local.is_to_local dst_ip then
-      Log.debug (fun m -> m "Dispatcher: allowed pkt[local] %a -> %a" pp_ip src_ip pp_ip dst_ip) >>= fun () ->
       Local.write_to_service Ethif_wire.IPv4 buf
     else if Policy.is_authorized_transport t.policy src_ip dst_ip then
-      Log.debug (fun m -> m "Dispatcher: allowed pkt %a -> %a" pp_ip src_ip pp_ip dst_ip) >>= fun () ->
       NAT.translate t.nat (src_ip, dst_ip) (buf, pkt) >>= fun (nat_src_ip, nat_dst_ip, nat_buf, nat_pkt) ->
-      Log.debug (fun m -> m "Dispatcher: after NAT %a -> %a" pp_ip nat_src_ip pp_ip nat_dst_ip) >>= fun () ->
+      Log.debug (fun m -> m "Dispatcher: allowed pkt[NAT] %a -> %a => %a -> %a"
+          pp_ip src_ip pp_ip dst_ip pp_ip nat_src_ip pp_ip nat_dst_ip) >>= fun () ->
       Interfaces.to_push t.interfaces nat_dst_ip nat_buf
     else Log.warn (fun m -> m "Dispatcher: dropped pkt %a -> %a" pp_ip src_ip pp_ip dst_ip)
 

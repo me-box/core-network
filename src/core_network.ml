@@ -29,8 +29,10 @@ let logs =
   let src_levels = [
     `Src "core",     Logs.Info;
     `Src "junction", Logs.Info;
-    `Src "monitor",  Logs.Info;
-    `Src "intf",     Logs.Info;] in
+    `Src "dns",      Logs.Info;
+    `Src "policy",   Logs.Info;
+    `Src "NAT",      Logs.Info;
+    `Src "monitor",  Logs.Info;] in
   Arg.(value & opt (list Utils.log_threshold) src_levels & info ["l"; "logs"] ~doc ~docv:"LEVEL")
 
 let cmd =
