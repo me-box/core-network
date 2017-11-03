@@ -9,5 +9,5 @@ iptables -P FORWARD DROP
 iptables -F INPUT
 iptables -A INPUT -i lo -j ACCEPT
 
-echo starting bridge...
-./bridge $@
+echo starting core-network...
+./core-network $@

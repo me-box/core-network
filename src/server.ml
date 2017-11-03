@@ -82,7 +82,7 @@ module Make(Backend: Vnetif.BACKEND) = struct
              match Cohttp.Header.get_authorization headers with
              | Some (`Basic (name, _)) -> ok name
              | _ -> error_msg "Missing API key/token" end)
-       >>= fun key  -> Br_env.cm_key ()
+       >>= fun key  -> Env.cm_key ()
        >>= fun key' -> if key = key' then ok () else error_msg "Unauthorized: CM key invalid")
       |> function
       | Ok () ->
