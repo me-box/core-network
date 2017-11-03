@@ -1,4 +1,5 @@
 open Cmdliner
+open Lib_core_network
 
 let core = Logs.Src.create "core" ~doc:"Databox's core-network component"
 module Log = (val Logs_lwt.src_log core : Logs_lwt.LOG)
