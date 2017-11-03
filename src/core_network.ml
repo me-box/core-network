@@ -14,7 +14,7 @@ let print_async_exn () =
 
 let main logs =
   let open Lwt.Infix in
-  Utils.set_up_logs logs >>= fun () ->
+  Utils.Log.set_up_logs logs >>= fun () ->
   Monitor.create () >>= fun (intf_st, monitor_starter) ->
   Log.info (fun m -> m "starting interface monitor...") >>= fun () ->
   Lwt.async monitor_starter;
@@ -33,7 +33,7 @@ let logs =
     `Src "policy",   Logs.Info;
     `Src "NAT",      Logs.Info;
     `Src "monitor",  Logs.Info;] in
-  Arg.(value & opt (list Utils.log_threshold) src_levels & info ["l"; "logs"] ~doc ~docv:"LEVEL")
+  Arg.(value & opt (list Utils.Log.log_threshold) src_levels & info ["l"; "logs"] ~doc ~docv:"LEVEL")
 
 let cmd =
   let doc = "databox-bridge core-network" in
