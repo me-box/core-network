@@ -2,7 +2,7 @@
 
 (executable
   ((name test)
-   (libraries (lib_core_network))))
+   (libraries (lib_core_network tuntap mirage-vnetif ipaddr))))
 
 (alias
  ((name runtest)
