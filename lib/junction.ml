@@ -161,11 +161,16 @@ module Local = struct
     in
     post "/privileged" add_privileged_handler
 
+  let get_status =
+    let status_handler = fun req -> respond' ~code:`OK (`String "active") in
+    get "/status" status_handler
+
   let start_service t po =
    let callback = callback_of_routes [
         connect_for po;
         disconnect_for po;
         add_privileged po;
+        get_status;
       ] in
     start t.service ~callback
 
