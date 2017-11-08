@@ -1,0 +1,16 @@
+sudo: required
+
+addons:
+  apt:
+    packages:
+      - docker-ce
+
+services:
+  - docker
+
+language: c
+
+before_script:
+  - cd test
+script:
+  - ./core-network-test
