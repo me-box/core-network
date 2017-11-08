@@ -1,0 +1,27 @@
+version: '3.3'
+
+services:
+#start the databox platform
+    container-manager:
+        image: appropriate/curl:latest
+        entrypoint: sleep 8h
+        volumes:
+            - './.resolv.conf:/etc/resolv.conf'
+        networks:
+            - databox-system-net
+        secrets:
+            - DATABOX_NETWORK_KEY
+        deploy:
+            replicas: 1
+            endpoint_mode: dnsrr
+            placement:
+                constraints:
+                    - 'node.role == manager'
+
+secrets:
+  DATABOX_NETWORK_KEY:
+    file: ./certs/databox-network-encoded
+
+networks:
+    databox-system-net:
+        external: true
