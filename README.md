@@ -1,4 +1,4 @@
-# core-network
+# core-network [![Build Status](https://travis-ci.org/me-box/core-network.svg?branch=master)](https://travis-ci.org/me-box/core-network)
 A system component in databox managing container-to-container and container-to-external communications
 
 ### Operation Models
