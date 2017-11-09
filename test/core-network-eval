@@ -1,0 +1,119 @@
+#!/bin/bash
+
+source ./scripts/utils.sh
+
+## extract a host interface IP address
+ips=($(ifconfig | sed -En 's/127.0.0.1//;s/172.//;s/169.//;s/.inet (addr:)?(([0-9]+.){3}[0-9]+).*/\2/p'))
+EXT_IP=$ips
+if [[ "${#ips[@]}" -gt "1" ]]; then
+  select ip in ${ips[*]}; do
+    case $ip in
+      exit )
+        die 0 "exiting ..."
+        break
+        ;;
+
+      * )
+        EXT_IP=$ip
+        break
+        ;;
+    esac
+  done
+fi
+
+NODE_IMAGE="node:alpine"
+
+function _exec {
+  docker run \
+         --net=host -ti --rm -v "$(pwd -P)":/cwd -w /cwd \
+         $DARGS $NODE_IMAGE "$@"
+}
+
+docker swarm init --advertise-addr $EXT_IP > /dev/null
+
+source ./scripts/docker_utils.sh
+
+
+################################################################################
+
+err "[iperf3 without core-network]"
+docker network create -d overlay --internal no-core-network >/dev/null
+
+err "start direct store..."
+docker service create --name direct-store --replicas 1 --endpoint-mode dnsrr \
+  --network no-core-network networkstatic/iperf3 -s >/dev/null 2>&1
+DSERVER=$(container direct-store)
+DS_IP=$(ip_on_net ${DSERVER} no-core-network)
+
+err "start direct app..."
+docker service create --name direct-app --replicas 1 --endpoint-mode dnsrr \
+  --restart-condition none \
+  --network no-core-network networkstatic/iperf3 -c ${DS_IP} -V -M 1400 >/dev/null 2>&1
+DCLIENT=$(container direct-app)
+
+sleep 10s
+ALIVE=0
+while [ "$ALIVE" == "0" ]; do
+  err "${DCLIENT} still alive!"
+  sleep 1s
+  ALIVE=$(docker inspect ${DCLIENT} >/dev/null 2>&1)
+done
+LOG=
+while [ -z "$LOG" ]; do
+  docker logs ${DCLIENT} >direct-app-log
+  LOG=$(cat direct-app-log)
+done
+
+docker service rm direct-app >/dev/null
+docker service rm direct-store >/dev/null
+docker network rm no-core-network >/dev/null
+
+err "[iperf3 without core-network] DONE!"
+sleep 5s
+
+################################################################################
+
+echo
+err "[iperf3 with core-network]"
+docker network create -d overlay --internal --attachable databox-system-net >/dev/null
+
+err "start core-network..."
+docker-compose -f ./docker-core-network.yaml up -d >/dev/null 2>&1
+_exec node ./src/createResolvConf.js "$(docker inspect $(docker ps -q --filter="name=databox-network"))"
+
+err "start container-manager..."
+docker stack deploy -c docker-compose.yaml databox >/dev/null 2>&1
+assert_or_die $? 0 "Problem with docker stack deploy"
+
+CM=$(container "container-manager")
+CN=$(container "databox-network")
+KEY=$(docker exec ${CM} cat /run/secrets/DATABOX_NETWORK_KEY)
+
+docker exec ${CM} curl -s --retry 2 -o /dev/null -X POST -H "x-api-key: ${KEY}" \
+  http://${CN}:8080/privileged -d "{\"src_ip\": \"$(ip_on_net ${CM} databox-system-net)\"}"
+
+err "install app and store..."
+install "networkstatic/iperf3" "store" "-s"
+STORE=$(container store)
+
+DARGS="--entrypoint sleep"
+install "networkstatic/iperf3" "app" "8h"
+DARGS=
+APP=$(container app)
+
+err "connect app and store by core-network..."
+docker exec ${CM} curl -s --retry 2 -o /dev/null \
+  -X POST -H "x-api-key: ${KEY}" \
+  http://${CN}:8080/connect -d '{"name":"app", "peers":["store"]}'
+
+STORE_IP=$(docker exec ${APP} ping -c 1 -q store | sed -En 's/.*\((([0-9]+.){3}[0-9]+)\).*/\1/p')
+err "iperf3 server STORE_IP: ${STORE_IP}"
+docker exec ${APP} iperf3 -c ${STORE_IP} -V -M 1400 >spoofed-app-log
+
+docker service rm store >/dev/null
+docker service rm app >/dev/null
+
+docker logs ${CN} >core-network-log 2>&1
+err "[iperf3 with core-network] DONE!"
+
+################################################################################
