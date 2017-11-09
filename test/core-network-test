@@ -61,9 +61,16 @@ function install {
 # uninstall <service>
 function uninstall {
   NET=${1}-core-network
-  docker service rm ${1}
+  docker service rm ${1} >/dev/null
   docker network disconnect ${NET} ${CN}
-  docker network rm ${NET}
+  docker network rm ${NET} >/dev/null
+
+  DANGLING=0
+  while [ "$DANGLING" == "0" ]; do
+    sleep 1s
+    docker network inspect ${NET} >/dev/null 2>&1
+    DANGLING=$?
+  done
 }
 
 # container <service>
@@ -71,8 +78,8 @@ function uninstall {
 function container {
   NAME=
   while [ -z "$NAME" ]; do
-   sleep 1s
-   NAME=$(docker ps --filter "name=${1}" --format "{{.Names}}")
+    sleep 1s
+    NAME=$(docker ps --filter "name=${1}" --format "{{.Names}}")
   done
   echo ${NAME}
 }
@@ -90,13 +97,45 @@ install "python:2.7-alpine" "store"
 APP=$(container "app")
 STORE=$(container "store")
 
-STATUS=$(docker exec ${CM} curl -s -w "%{http_code}\\n" --retry 2 -o /dev/null -X POST -H "x-api-key: ${KEY}" \
+STATUS=$(docker exec ${CM} curl -s -w "%{http_code}\\n" --retry 2 -o /dev/null \
+  -X POST -H "x-api-key: ${KEY}" \
   http://${CN}:8080/connect -d '{"name":"app", "peers":["store"]}')
 test_assert ${STATUS} 200 "Is app and store successfully connected?"
 
+docker cp hello.html ${STORE}:/
+docker exec -d ${STORE} python -m SimpleHTTPServer 8080
+sleep 5s # for python HTTP server to boot up
+RESP=$(docker exec ${APP} curl -s http://store:8080/hello.html)
+test_assert "${RESP}" "world" "Does HTTP traffic get through?"
+
+err "disconnect app and store..."
+docker exec ${CM} curl -s --retry 2 -o /dev/null -X POST -H "x-api-key: ${KEY}" \
+  http://${CN}:8080/disconnect -d "{\"name\": \"app\", \"ip\":\"$(ip_on_net ${APP} "app-core-network")/24\"}"
+
+docker exec ${APP} curl -s http://store:8080/hello.html
+test_assert $? "6" "Fail after disconnection?"
+
+err "remove app and store..."
+uninstall "app"
+uninstall "store"
+err "app, store and related networks are purged..."
+RESP=$(docker exec ${CM} curl -s --retry 2 -H "x-api-key: ${KEY}" http://${CN}:8080/status)
+test_assert "${RESP}" "active" "Is core-network still alive after networks torn down?"
+
+err "reinstall and reconnect app and store..."
+APP=
+STORE=
+install "appropriate/curl:latest" "app"
+install "python:2.7-alpine" "store"
+APP=$(container "app")
+STORE=$(container "store")
+
+docker exec ${CM} curl -s --retry 2 -o /dev/null \
+  -X POST -H "x-api-key: ${KEY}" \
+  http://${CN}:8080/connect -d '{"name":"app", "peers":["store"]}'
 
 docker cp hello.html ${STORE}:/
 docker exec -d ${STORE} python -m SimpleHTTPServer 8080
-sleep 5s
+sleep 5s # for python HTTP server to boot up
 RESP=$(docker exec ${APP} curl -s http://store:8080/hello.html)
-test_assert "${RESP}" "world" "Does HTTP traffic get through?"
+test_assert "${RESP}" "world" "Does HTTP traffic get through after reinstallation?"
