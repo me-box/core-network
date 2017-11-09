@@ -28,7 +28,4 @@ _build/
 setup.data
 setup.log
 
-exp
-driver
 *.merlin
-test

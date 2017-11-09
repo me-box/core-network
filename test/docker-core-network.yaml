@@ -1,0 +1,17 @@
+version: '3.2'
+
+services:
+  databox-network:
+    build:
+      context: ../
+      dockerfile: Dockerfile
+    networks:
+      - databox-system-net
+    volumes:
+      - './certs/databox-network:/run/secrets/DATABOX_NETWORK_KEY'
+    cap_add:
+      - NET_ADMIN
+
+networks:
+  databox-system-net:
+    external: true

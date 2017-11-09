@@ -10,7 +10,7 @@ RUN sudo apk update && sudo apk add alpine-sdk bash gmp-dev perl autoconf linux-
     opam switch import core-network.export
 
 ADD . .
-RUN sudo chown opam: -R src && cd src && opam config exec -- jbuilder build core_network.exe
+RUN sudo chown opam: -R . && opam config exec -- jbuilder build bin/core_network.exe
 
 
 FROM alpine:3.6
@@ -18,7 +18,7 @@ FROM alpine:3.6
 WORKDIR /core-network
 ADD start.sh start.sh
 RUN apk update && apk add bash gmp-dev iptables iproute2
-COPY --from=BUILDER /core-network/src/_build/default/core_network.exe core-network
+COPY --from=BUILDER /core-network/_build/default/bin/core_network.exe core-network
 
 EXPOSE 8080
 
