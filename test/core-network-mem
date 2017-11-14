@@ -1,0 +1,115 @@
+#!/bin/bash
+
+#!/bin/bash
+
+source ./scripts/utils.sh
+
+## extract a host interface IP address
+ips=($(ifconfig | sed -En 's/127.0.0.1//;s/172.//;s/169.//;s/.inet (addr:)?(([0-9]+.){3}[0-9]+).*/\2/p'))
+EXT_IP=$ips
+if [[ "${#ips[@]}" -gt "1" ]]; then
+  select ip in ${ips[*]}; do
+    case $ip in
+      exit )
+        die 0 "exiting ..."
+        break
+        ;;
+
+      * )
+        EXT_IP=$ip
+        break
+        ;;
+    esac
+  done
+fi
+
+NODE_IMAGE="node:alpine"
+
+function _exec {
+  docker run \
+         --net=host -ti --rm -v "$(pwd -P)":/cwd -w /cwd \
+         $DARGS $NODE_IMAGE "$@"
+}
+
+docker swarm init --advertise-addr $EXT_IP > /dev/null
+
+docker network create -d overlay --internal --attachable databox-system-net >/dev/null
+
+err "start core-network..."
+docker-compose -f ./docker-core-network.yaml up -d >/dev/null 2>&1
+_exec node ./src/createResolvConf.js "$(docker inspect $(docker ps -q --filter="name=databox-network"))"
+
+err "start container-manager..."
+docker stack deploy -c docker-compose.yaml databox >/dev/null 2>&1
+assert_or_die $? 0 "Problem with docker stack deploy"
+
+
+source ./scripts/docker_utils.sh
+
+CM=$(container "container-manager")
+CN=$(container "databox-network")
+KEY=$(docker exec ${CM} cat /run/secrets/DATABOX_NETWORK_KEY)
+
+docker exec ${CM} curl -s --retry 2 -o /dev/null -X POST -H "x-api-key: ${KEY}" \
+  http://${CN}:8080/privileged -d "{\"src_ip\": \"$(ip_on_net ${CM} databox-system-net)\"}"
+
+LOG=""
+
+function checkP {
+    ENTRY=$(docker exec ${CN} ps -o comm,rss,vsz | grep "core-network" \
+        | awk -v env_time="$(datef)" '{print env_time "\t" $2 "\t" $3 "\t"}')
+    LOG+=$ENTRY
+    LOG+="\n"
+}
+
+ROUND=15
+for r in $(seq 1 ${ROUND}); do
+    LOG+="Round 1\n"
+
+    checkP
+
+    err "${r} install app and store..."
+    install "appropriate/curl:latest" "app"
+    install "python:2.7-alpine" "store"
+    APP=$(container "app")
+    STORE=$(container "store")
+
+    STATUS=$(docker exec ${CM} curl -s -w "%{http_code}\\n" --retry 2 -o /dev/null \
+      -X POST -H "x-api-key: ${KEY}" \
+      http://${CN}:8080/connect -d '{"name":"app", "peers":["store"]}')
+    test_assert ${STATUS} 200 "Is app and store successfully connected?"
+
+    checkP
+
+    docker cp mem.html ${STORE}:/
+    docker exec -d ${STORE} python -m SimpleHTTPServer 8080
+    sleep 5s # for python HTTP server to boot up
+    EXPECTED=$(cat mem.html)
+
+    QUERY_ROUND=60
+    err "start transmitting data for ${QUERY_ROUND} times..."
+    for i in $(seq 1 ${QUERY_ROUND}); do
+        RESP=$(docker exec ${APP} curl -s http://store:8080/mem.html)
+        if [[ "$RESP" != "$EXPECTED" ]]; then
+            fail "Get mem.html" "$RESP"
+        fi
+        sleep 1s
+    done
+
+    checkP
+
+    err "disconnect app and store..."
+    docker exec ${CM} curl -s --retry 2 -o /dev/null -X POST -H "x-api-key: ${KEY}" \
+      http://${CN}:8080/disconnect -d "{\"name\": \"app\", \"ip\":\"$(ip_on_net ${APP} "app-core-network")/24\"}"
+
+    err "remove app and store..."
+    uninstall "app"
+    uninstall "store"
+    err "app, store and related networks are purged..."
+
+    RESP=$(docker exec ${CM} curl -s --retry 2 -H "x-api-key: ${KEY}" http://${CN}:8080/status)
+    test_assert "${RESP}" "active" "Is core-network still alive after networks torn down?"
+
+done
+
+echo -e "$LOG" >mem-log

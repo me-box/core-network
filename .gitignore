@@ -29,3 +29,5 @@ setup.data
 setup.log
 
 *.merlin
+
+log

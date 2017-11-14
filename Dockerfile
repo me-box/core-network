@@ -18,6 +18,7 @@ FROM alpine:3.6
 WORKDIR /core-network
 ADD start.sh start.sh
 RUN apk update && apk add bash gmp-dev iptables iproute2
+RUN apk update && apk add tcpdump
 COPY --from=BUILDER /core-network/_build/default/bin/core_network.exe core-network
 
 EXPOSE 8080
