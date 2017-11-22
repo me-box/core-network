@@ -235,21 +235,30 @@ let create intf_st =
         (fun () -> Log.info (fun m -> m "intf %s exited!" intf.Intf.dev)) in
     Lwt.return @@ Lwt.async t in
 
-  Lwt_stream.next intf_st >>= (function
-  | `Down dev -> Lwt.fail (Invalid_argument dev)
-  | `Up (local, local_starter) -> Lwt.return (local, local_starter))
-  >>= fun (local, local_starter) ->
-  Local.initialize local policy interfaces >>= fun service_starter ->
-  register_and_start local local_starter >>= fun () ->
-  Log.info (fun m -> m "start local service...") >>= fun () ->
-  Lwt.return @@ Lwt.async service_starter >>= fun () ->
-
   let rec junction_lp () =
     Lwt_stream.get intf_st >>= function
     | None -> Log.warn (fun m -> m "monitor stream closed!" )
     | Some (`Up (intf, intf_starter)) ->
-        register_and_start intf intf_starter >>= fun () ->
-        junction_lp ()
+        if intf.Intf.dev = "eth0" then
+          Local.initialize intf policy interfaces >>= fun service_starter ->
+          register_and_start intf intf_starter >>= fun () ->
+          Log.info (fun m -> m "start local service on %s..." intf.Intf.dev) >>= fun () ->
+          Lwt.async service_starter;
+          junction_lp ()
+        else if intf.dev = "eth1" then
+          let network = intf.Intf.network in
+          let gw = network
+            |> Ipaddr.V4.Prefix.network |> Ipaddr.V4.to_int32
+            |> Int32.add Int32.one |> Ipaddr.V4.of_int32 in
+          Intf.set_gateway intf gw;
+          Log.info (fun m -> m "set gateway for %s(%a) to %a"
+              intf.Intf.dev Ipaddr.V4.Prefix.pp_hum intf.Intf.network Ipaddr.V4.pp_hum gw)
+          >>= fun () ->
+          register_and_start intf intf_starter >>= fun () ->
+          junction_lp ()
+        else
+          register_and_start intf intf_starter >>= fun () ->
+          junction_lp ()
     | Some (`Down dev) ->
         Interfaces.deregister_intf interfaces dev >>= fun () ->
         junction_lp ()

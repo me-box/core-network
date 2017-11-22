@@ -21,6 +21,8 @@ type t = {
   ip: Ipaddr.V4.t;
   network: Ipaddr.V4.Prefix.t;
   mtu: int;
+  mutable gateway: Ipaddr.V4.t option;
+
   recv_st: Cstruct.t Lwt_stream.t;
   send_push: Cstruct.t option -> unit;
   acquire_fake_ip: unit -> Ipaddr.V4.t Lwt.t;
@@ -45,31 +47,39 @@ let read_intf dev net eth arp recv_push =
       Netif.disconnect net >>= fun () ->
       Lwt.return @@ recv_push None
 
-let rec write_intf dev eth arp send_st =
+let rec write_intf t eth arp send_st =
   Lwt_stream.get send_st >>= function
   | Some ipv4_pkt ->
       let src_mac = Ethif.mac eth in
       let dst = Pkt.dst_of_ipv4 ipv4_pkt in
-      Arpv4.query arp dst >>= (function
-      | Ok dst_mac ->
-          let hd = Pkt.eth_hd src_mac dst_mac Ethif_wire.IPv4 in
-          Ethif.writev eth [hd; ipv4_pkt] >>= (function
-            | Ok () -> Lwt.return_unit
-            | Error e -> Log.err (fun m -> m "%s Ethif.writev %a" dev Ethif.pp_error e))
-      | Error e ->
-          Log.err (fun m -> m "%s Arpv4.query: %a" dev Arpv4.pp_error e))
-      >>= fun () -> write_intf dev eth arp send_st
-  | None -> Log.warn (fun m -> m "%s send stream is closed!" dev)
+      if not (Ipaddr.V4.Prefix.mem dst t.network) && t.gateway = None then
+        Log.err (fun m -> m "%s(%a without gateway) nowhere to send pkt with dst:%a"
+            t.dev Ipaddr.V4.Prefix.pp_hum t.network Ipaddr.V4.pp_hum dst) >>= fun () ->
+        write_intf t eth arp send_st
+      else
+        let query_ip =
+          if Ipaddr.V4.Prefix.mem dst t.network then dst
+          else match t.gateway with None -> assert false | Some gw -> gw in
+        Arpv4.query arp query_ip >>= (function
+        | Ok dst_mac ->
+            let hd = Pkt.eth_hd src_mac dst_mac Ethif_wire.IPv4 in
+            Ethif.writev eth [hd; ipv4_pkt] >>= (function
+              | Ok () -> Lwt.return_unit
+              | Error e -> Log.err (fun m -> m "%s Ethif.writev %a" t.dev Ethif.pp_error e))
+        | Error e ->
+            Log.err (fun m -> m "%s Arpv4.query: %a" t.dev Arpv4.pp_error e))
+        >>= fun () -> write_intf t eth arp send_st
+  | None -> Log.warn (fun m -> m "%s send stream is closed!" t.dev)
 
 
-let start_intf dev net eth arp recv_push send_st () =
+let start_intf t net eth arp recv_push send_st () =
   Lwt.catch (fun () ->
       try
         Lwt.pick [
-          read_intf dev net eth arp recv_push;
-          write_intf dev eth arp send_st]
+          read_intf t.dev net eth arp recv_push;
+          write_intf t eth arp send_st]
       with e -> Lwt.fail e)
-    (fun e -> Log.err (fun m -> m "%s on_intf: %s" dev (Printexc.to_string e)))
+    (fun e -> Log.err (fun m -> m "%s on_intf: %s" t.dev (Printexc.to_string e)))
 
 
 let init_stack dev ip =
@@ -121,7 +131,9 @@ let create ~dev ~cidr =
   let acquire_fake_ip, release_fake_ip = fake_ip_op arp ip network in
   let fake_ips () = Arpv4.get_ips arp |> lt_remove ip in
   let t = {
-    dev; ip; network; mtu;
+    dev; ip; network; gateway = None; mtu;
     recv_st; send_push;
     acquire_fake_ip; release_fake_ip; fake_ips} in
-  Lwt.return (t, start_intf dev net eth arp recv_push send_st)
+  Lwt.return (t, start_intf t net eth arp recv_push send_st)
+
+let set_gateway t gw = t.gateway <- Some gw

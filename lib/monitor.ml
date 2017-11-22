@@ -33,6 +33,7 @@ let existed_intf interfaces push_intf =
         let dev = groups.(3) and addr = groups.(1) in
         (dev, addr) :: acc
       with Not_found -> acc) [] lines
+  |> List.rev
   |> fun existed ->
   Log.info (fun m -> m "found %d existed phy interfaces" (List.length existed)) >>= fun () ->
 
