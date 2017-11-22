@@ -106,7 +106,16 @@ docker cp hello.html ${STORE}:/
 docker exec -d ${STORE} python -m SimpleHTTPServer 8080
 sleep 5s # for python HTTP server to boot up
 RESP=$(docker exec ${APP} curl -s http://store:8080/hello.html)
-test_assert "${RESP}" "world" "Does HTTP traffic get through?"
+test_assert "${RESP}" "world" "Does HTTP traffic app<>store get through?"
+
+STATUS=$(docker exec ${CM} curl -s -w "%{http_code}\\n" --retry 2 -o /dev/null \
+  -X POST -H "x-api-key: ${KEY}" \
+  http://${CN}:8080/connect -d '{"name":"app", "peers":["www.google.com"]}')
+test_assert ${STATUS} 200 "Is app and google.com successfully connected?"
+
+sleep 1s
+STATUS=$(docker exec ${APP} curl -s -w "%{http_code}\\n" -o /dev/null www.google.com)
+test_assert ${STATUS} 302 "Does HTTP traffic app<>www.google.com get through?"
 
 err "disconnect app and store..."
 docker exec ${CM} curl -s --retry 2 -o /dev/null -X POST -H "x-api-key: ${KEY}" \

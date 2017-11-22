@@ -70,7 +70,7 @@ let allow_transport t src_ip dst_ip =
 
 let forbidden_transport t src_ip dst_ip =
   t.transport <- IpPairSet.remove (src_ip, dst_ip) t.transport;
-  Log.info (fun m -> m "removetransport %a -> %a" pp_ip src_ip pp_ip dst_ip)
+  Log.info (fun m -> m "remove transport %a -> %a" pp_ip src_ip pp_ip dst_ip)
   >>= fun () -> Lwt.return_unit
 
 
@@ -105,8 +105,13 @@ let process_pair_connection t nx ny =
 
 let connect t nx ny =
   Lwt.async (fun () ->
+    Lwt.catch (fun () ->
       process_pair_connection t nx ny >>= fun () ->
-      Log.info (fun m -> m "Policy.connect %s <> %s" nx ny));
+      Log.info (fun m -> m "Policy.connect %s <> %s" nx ny))
+      (function
+      | Invalid_argument n ->
+          Log.err (fun m -> m "Policy.connect unresolvable %s" n)
+      | exn -> Lwt.fail exn));
   Lwt.return_unit
 
 let disconnect t n ip =

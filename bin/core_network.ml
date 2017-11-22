@@ -28,12 +28,13 @@ let main logs =
 let logs =
   let doc = "set source-dependent logging level, eg: --logs *:info,foo:debug" in
   let src_levels = [
-    `Src "core",     Logs.Info;
-    `Src "junction", Logs.Info;
-    `Src "dns",      Logs.Info;
-    `Src "policy",   Logs.Info;
-    `Src "NAT",      Logs.Info;
-    `Src "monitor",  Logs.Info;] in
+    `Src "core",       Logs.Info;
+    `Src "junction",   Logs.Info;
+    `Src "dns",        Logs.Info;
+    `Src "policy",     Logs.Info;
+    `Src "NAT",        Logs.Info;
+    `Src "monitor",    Logs.Info;
+    `Src "interfaces", Logs.Info;] in
   Arg.(value & opt (list Utils.Log.log_threshold) src_levels & info ["l"; "logs"] ~doc ~docv:"LEVEL")
 
 let cmd =

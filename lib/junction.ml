@@ -51,7 +51,7 @@ module Local = struct
             >>= Lwt.return
 
   (*from local stack in Server*)
-  let set_local_listener t interfaces =
+  let set_local_listener t intf =
     let open Frame in
     let listener buf =
       Lwt.catch (fun () ->
@@ -59,7 +59,8 @@ module Local = struct
       | Ok (Ethernet {dst = dst_mac; payload = Ipv4 {dst = dst_ip}})
         when 0 = Macaddr.compare dst_mac local_virtual_mac ->
           let pkt_raw = Cstruct.shift buf Ethif_wire.sizeof_ethernet in
-          Interfaces.to_push interfaces dst_ip pkt_raw
+          intf.Intf.send_push @@ Some pkt_raw;
+          Lwt.return_unit
       | Ok (Ethernet {src = tha; payload = Arp {op = `Request; spa = tpa; tpa = spa}}) ->
           let arp_resp =
             let open Arpv4_packet in
@@ -77,7 +78,7 @@ module Local = struct
     Backend.set_listen_fn t.backend t.id listener
 
 
-  let create intf interfaces =
+  let create intf =
     let yield = Lwt_main.yield in
     let use_async_readers = true in
     let backend = Backend.create ~yield ~use_async_readers () in
@@ -92,7 +93,7 @@ module Local = struct
     let network = intf.Intf.network in
     Service.make backend address >>= fun service ->
     let t = {id; backend; service; network; address} in
-    set_local_listener t interfaces;
+    set_local_listener t intf;
     instance := Some t;
     Lwt.return t
 
@@ -175,8 +176,8 @@ module Local = struct
     start t.service ~callback
 
 
-  let initialize intf policy interfaces =
-    create intf interfaces >>= fun t ->
+  let initialize intf policy =
+    create intf >>= fun t ->
     Lwt.return @@ start_service t policy
 end
 
@@ -207,7 +208,8 @@ module Dispatcher = struct
       Nat.translate t.nat (src_ip, dst_ip) (buf, pkt) >>= fun (nat_src_ip, nat_dst_ip, nat_buf, nat_pkt) ->
       Log.debug (fun m -> m "Dispatcher: allowed pkt[NAT] %a -> %a => %a -> %a"
           pp_ip src_ip pp_ip dst_ip pp_ip nat_src_ip pp_ip nat_dst_ip) >>= fun () ->
-      Interfaces.to_push t.interfaces nat_dst_ip nat_buf
+      Interfaces.to_push t.interfaces nat_src_ip nat_buf
+    else if Dns_service.is_dns_response pkt then Lwt.return_unit
     else Log.warn (fun m -> m "Dispatcher: dropped pkt %a -> %a" pp_ip src_ip pp_ip dst_ip)
 
 
@@ -240,7 +242,7 @@ let create intf_st =
     | None -> Log.warn (fun m -> m "monitor stream closed!" )
     | Some (`Up (intf, intf_starter)) ->
         if intf.Intf.dev = "eth0" then
-          Local.initialize intf policy interfaces >>= fun service_starter ->
+          Local.initialize intf policy >>= fun service_starter ->
           register_and_start intf intf_starter >>= fun () ->
           Log.info (fun m -> m "start local service on %s..." intf.Intf.dev) >>= fun () ->
           Lwt.async service_starter;

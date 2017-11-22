@@ -10,6 +10,11 @@ let is_dns_query = let open Frame in function
   | Ipv4 { payload = Tcp { dst = 53; _ }; _ } -> true
   | _ -> false
 
+let is_dns_response = let open Frame in function
+  | Ipv4 { payload = Udp { src = 53; _ }; _ }
+  | Ipv4 { payload = Tcp { src = 53; _ }; _ } -> true
+  | _ -> false
+
 let query_of_pkt = let open Frame in function
   | Ipv4 { payload = Udp { dst = 53; payload = Payload buf}}
   | Ipv4 { payload = Tcp { dst = 53; payload = Payload buf}} ->
@@ -37,17 +42,19 @@ let try_resolve n () =
 
 
 let ip_of_name n =
-  let rec keep_trying n=
+  let lim = 5 in
+  let rec keep_trying n cnt =
+    if cnt > lim then Lwt.fail @@ Invalid_argument n else
     try_resolve n () >>= function
     | `Later n ->
         Log.info (fun m -> m "resolve %s later..." n) >>= fun () ->
         Lwt_unix.sleep 0.3 >>= fun () ->
-        keep_trying n
+        keep_trying n (succ cnt)
     | `Resolved (n, ip) ->
         Log.info (fun m -> m "resolved: %s %a" n pp_ip ip) >>= fun () ->
         Lwt.return ip in
   Log.info (fun m -> m "try to resolve %s..." n) >>= fun () ->
-  keep_trying n
+  keep_trying n 1
 
 
 let to_dns_response pkt resp =
