@@ -115,7 +115,8 @@ test_assert ${STATUS} 200 "Is app and google.com successfully connected?"
 
 sleep 1s
 STATUS=$(docker exec ${APP} curl -s -w "%{http_code}\\n" -o /dev/null www.google.com)
-test_assert ${STATUS} 302 "Does HTTP traffic app<>www.google.com get through?"
+CHECK="Does HTTP traffic app<>www.google.com get through?"
+if [ ${STATUS} -lt 400 ]; then success "$CHECK"; else fail "$CHECK" ${STATUS}; fi
 
 err "disconnect app and store..."
 docker exec ${CM} curl -s --retry 2 -o /dev/null -X POST -H "x-api-key: ${KEY}" \
