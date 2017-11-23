@@ -42,13 +42,13 @@ let try_resolve n () =
 
 
 let ip_of_name n =
-  let lim = 5 in
+  let lim = 30 in
   let rec keep_trying n cnt =
     if cnt > lim then Lwt.fail @@ Invalid_argument n else
     try_resolve n () >>= function
     | `Later n ->
-        Log.info (fun m -> m "resolve %s later..." n) >>= fun () ->
-        Lwt_unix.sleep 0.3 >>= fun () ->
+        Log.debug (fun m -> m "resolve %s later..." n) >>= fun () ->
+        Lwt_unix.sleep 1. >>= fun () ->
         keep_trying n (succ cnt)
     | `Resolved (n, ip) ->
         Log.info (fun m -> m "resolved: %s %a" n pp_ip ip) >>= fun () ->
