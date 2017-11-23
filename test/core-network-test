@@ -63,11 +63,11 @@ function uninstall {
   NET=${1}-core-network
   docker service rm ${1} >/dev/null
   docker network disconnect ${NET} ${CN}
-  docker network rm ${NET} >/dev/null
 
   DANGLING=0
   while [ "$DANGLING" == "0" ]; do
     sleep 1s
+    docker network rm ${NET} >/dev/null 2>&1
     docker network inspect ${NET} >/dev/null 2>&1
     DANGLING=$?
   done

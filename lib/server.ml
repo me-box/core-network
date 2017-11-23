@@ -136,9 +136,13 @@ module Make(Backend: Vnetif.BACKEND) = struct
     match Env.https_creds () with
     | Ok (cp, kp) ->
         let cert, priv_key = Fpath.to_string cp, Fpath.to_string kp in
-        X509_lwt.private_of_pems ~cert ~priv_key >>= fun certificate ->
-        let config = Tls.Config.server ~certificates:(`Single certificate) () in
-        Lwt.return @@ `TLS (config, `TCP port)
+        Lwt.catch (fun () ->
+            X509_lwt.private_of_pems ~cert ~priv_key >>= fun certificate ->
+            let config = Tls.Config.server ~certificates:(`Single certificate) () in
+            Lwt.return @@ `TLS (config, `TCP port))
+          (fun err ->
+            Log.warn (fun m -> m "while initializing tls: %s, roll with http" (Printexc.to_string err)) >>= fun () ->
+            Lwt.return (`TCP port))
     | Error _ ->
         Lwt.return (`TCP port)
 
