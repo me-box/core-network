@@ -21,6 +21,11 @@ let intf_event l =
       Some (`Down addr)
   with Not_found -> None
 
+let set_link_mtu dev mtu =
+  let comm = "ip", [|"ip"; "link"; "set"; "dev"; dev; "mtu"; string_of_int mtu|] in
+  Lwt_process.exec comm >>= function
+  | Unix.WEXITED 0 -> Log.info (fun m -> m "set mtu of %s to %d" dev mtu)
+  | _ -> Log.warn (fun m -> m "set mtu of %s FAILED, continue" dev)
 
 let existed_intf interfaces push_intf =
   let command = "ip", [|"ip"; "address"; "show"|] in
@@ -38,6 +43,7 @@ let existed_intf interfaces push_intf =
   Log.info (fun m -> m "found %d existed phy interfaces" (List.length existed)) >>= fun () ->
 
   Lwt_list.iter_p (fun (dev, cidr_addr) ->
+      set_link_mtu dev 4000 >>= fun () ->
       Intf.create ~dev ~cidr:cidr_addr >>= fun (t, start_t) ->
       push_intf (Some (`Up (t, start_t)));
       Hashtbl.add interfaces cidr_addr dev;
@@ -47,6 +53,7 @@ let existed_intf interfaces push_intf =
 type starter = unit -> unit Lwt.t
 
 type intf_event = [`Up of (Intf.t * Intf.starter) | `Down of string]
+
 
 let create () =
   let interfaces = Hashtbl.create 7 in
@@ -65,6 +72,7 @@ let create () =
         | None -> Lwt.return_unit
         | Some (`Up (dev, cidr_addr)) ->
             Log.info (fun m -> m "link up: %s %s" dev cidr_addr) >>= fun () ->
+            set_link_mtu dev 4000 >>= fun () ->
             Intf.create ~dev ~cidr:cidr_addr >>= fun (t, start_t) ->
             push_intf (Some (`Up (t, start_t)));
             Hashtbl.add interfaces cidr_addr dev;
