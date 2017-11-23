@@ -18,6 +18,6 @@ let cm_key () =
   end
 
 let https_creds () =
-  let cert_file  = Fpath.add_seg secrets_dir "databox-network.pem" in
-  let key_file   = Fpath.add_seg secrets_dir "databox-network.pem" in
+  let cert_file  = Fpath.add_seg secrets_dir "DATABOX_NETWORK.pem" in
+  let key_file   = Fpath.add_seg secrets_dir "DATABOX_NETWORK.pem" in
   Rresult.R.ok (cert_file, key_file)

@@ -7,4 +7,4 @@
      cstruct fpath bos ipaddr dns
      mirage-unix nocrypto.lwt
      mirage-vnetif mirage-net-psock tcpip.ethif tcpip.arpv4 tcpip.ipv4 tcpip.icmpv4 tcpip.udp tcpip.tcp tcpip.stack-direct
-     mirage-conduit mirage-http opium_kernel))))
+     mirage-conduit mirage-http tls.lwt opium_kernel))))

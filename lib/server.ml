@@ -128,11 +128,22 @@ module Make(Backend: Vnetif.BACKEND) = struct
     or_fail "Tcpip.connect" @@ Tcpip.connect config ethif arp i icmp u t >>= fun tcpip ->
     Nocrypto_entropy_lwt.initialize () >>= fun () ->
     or_fail "C.connect" @@ C.connect tcpip Conduit_mirage.empty >>= fun c ->
-    or_fail "Http.connect" @@ Http.connect c >>= fun start_fn ->
+    or_fail "C.with_tls" @@ Conduit_mirage.with_tls c >>= fun c_tls ->
+    or_fail "Http.connect" @@ Http.connect c_tls >>= fun start_fn ->
     Lwt.return {net;start_fn}
 
+  let server port =
+    match Env.https_creds () with
+    | Ok (cp, kp) ->
+        let cert, priv_key = Fpath.to_string cp, Fpath.to_string kp in
+        X509_lwt.private_of_pems ~cert ~priv_key >>= fun certificate ->
+        let config = Tls.Config.server ~certificates:(`Single certificate) () in
+        Lwt.return @@ `TLS (config, `TCP port)
+    | Error _ ->
+        Lwt.return (`TCP port)
+
   let start {start_fn} ?(port=8080) ?(callback=default_not_found)() =
-    let mode = `TCP port in
+    server port >>= fun server ->
     let t = Http.make ~callback () in
-    start_fn mode t
+    start_fn server t
 end
