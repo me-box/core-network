@@ -42,7 +42,7 @@ let try_resolve n () =
 
 
 let ip_of_name n =
-  let lim = 30 in
+  let lim = 60 in
   let rec keep_trying n cnt =
     if cnt > lim then Lwt.fail @@ Invalid_argument n else
     try_resolve n () >>= function
