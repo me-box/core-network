@@ -84,34 +84,36 @@ let forbidden_transport t src_ip dst_ip =
 
 
 let process_pair_connection t nx ny =
-  if DomainPairSet.mem (nx, ny) t.pairs then Lwt.return_unit else
-  Lwt_list.map_p Dns_service.ip_of_name [nx; ny] >>= fun ips ->
-  let ipx = List.hd ips
-  and ipy = List.hd @@ List.tl ips in
-  Interfaces.from_same_network t.interfaces ipx ipy >>= function
-  | false ->
-      add_pair t nx ny >>= fun () ->
-      if List.exists (fun e -> PrivilegedSet.mem e t.privileged) [DstHost nx; DstHost ny]
-      then Lwt.return_unit else
-      (* dns request from ipx for ny should return ipy' *)
-      (* dns request from ipy for nx should return ipx' *)
-      Interfaces.acquire_fake_dst t.interfaces ipx >>= fun ipy' ->
-      Interfaces.acquire_fake_dst t.interfaces ipy >>= fun ipx' ->
-      allow_resolve t ipx ny ipy' >>= fun () ->
-      allow_resolve t ipy nx ipx' >>= fun () ->
-      (* NAT: ipx -> ipy' => ipx' -> ipy *)
-      (* NAT: ipy -> ipx' => ipy' -> ipx *)
-      allow_transport t ipx ipy' >>= fun () ->
-      allow_transport t ipy ipx' >>= fun () ->
-      Nat.add_rule t.nat (ipx, ipy') (ipx', ipy) >>= fun () ->
-      Nat.add_rule t.nat (ipy, ipx') (ipy', ipx) >>= fun () ->
-      Lwt.return_unit
-  | true ->
-      (* nx ny are in the same network *)
-      (* DNS returns true IP directly, no NAT, no transport *)
-      allow_resolve t ipx ny ipy >>= fun () ->
-      allow_resolve t ipy nx ipx >>= fun () ->
-      Lwt.return_unit
+  if DomainPairSet.mem (nx, ny) t.pairs then Lwt.return_unit
+  else
+    add_pair t nx ny >>= fun () ->
+    if List.exists (fun e -> PrivilegedSet.mem e t.privileged) [DstHost nx; DstHost ny]
+    then Lwt.return_unit
+    else
+      Lwt_list.map_p Dns_service.ip_of_name [nx; ny] >>= fun ips ->
+      let ipx = List.hd ips
+      and ipy = List.hd @@ List.tl ips in
+      Interfaces.from_same_network t.interfaces ipx ipy >>= function
+      | false ->
+          (* dns request from ipx for ny should return ipy' *)
+          (* dns request from ipy for nx should return ipx' *)
+          Interfaces.acquire_fake_dst t.interfaces ipx >>= fun ipy' ->
+          Interfaces.acquire_fake_dst t.interfaces ipy >>= fun ipx' ->
+          allow_resolve t ipx ny ipy' >>= fun () ->
+          allow_resolve t ipy nx ipx' >>= fun () ->
+          (* NAT: ipx -> ipy' => ipx' -> ipy *)
+          (* NAT: ipy -> ipx' => ipy' -> ipx *)
+          allow_transport t ipx ipy' >>= fun () ->
+          allow_transport t ipy ipx' >>= fun () ->
+          Nat.add_rule t.nat (ipx, ipy') (ipx', ipy) >>= fun () ->
+          Nat.add_rule t.nat (ipy, ipx') (ipy', ipx) >>= fun () ->
+          Lwt.return_unit
+      | true ->
+          (* nx ny are in the same network *)
+          (* DNS returns true IP directly, no NAT, no transport *)
+          allow_resolve t ipx ny ipy >>= fun () ->
+          allow_resolve t ipy nx ipx >>= fun () ->
+          Lwt.return_unit
 
 
 let connect t nx ny =
@@ -157,7 +159,8 @@ let allow_privileged_host t name =
 let is_authorized_transport {transport; _} ipx ipy =
   IpPairSet.mem (ipx, ipy) transport
 
-
+(* difference with pair_connection: name resolving is unidirectional, *)
+(* `allow_resolve` only called once here *)
 let connect_for_privileged t src_ip name =
   Dns_service.ip_of_name name >>= fun dst_ip ->
   Interfaces.from_same_network t.interfaces src_ip dst_ip >>= function
