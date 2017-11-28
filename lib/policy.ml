@@ -12,10 +12,19 @@ module DomainPairSet = Set.Make(struct
       else Pervasives.compare (xx, xy) (yx, yy)
   end)
 
+type privileged = SrcIP of Ipaddr.V4.t | DstHost of string
+module PrivilegedSet = Set.Make(struct
+  type t = privileged
+  let compare x y = match x, y with
+    | SrcIP a, SrcIP b -> Ipaddr.V4.compare a b
+    | DstHost a, DstHost b -> Pervasives.compare a b
+    | SrcIP _, DstHost _ -> 1
+    | DstHost _, SrcIP _ -> -1
+end)
 
 type t = {
   mutable pairs : DomainPairSet.t;
-  mutable privileged: IpSet.t;
+  mutable privileged: PrivilegedSet.t;
   mutable transport: IpPairSet.t;
   mutable resolve: (string * Ipaddr.V4.t) list IpMap.t;
   interfaces: Interfaces.t;
@@ -76,12 +85,14 @@ let forbidden_transport t src_ip dst_ip =
 
 let process_pair_connection t nx ny =
   if DomainPairSet.mem (nx, ny) t.pairs then Lwt.return_unit else
-  Lwt_list.map_s Dns_service.ip_of_name [nx; ny] >>= fun ips ->
+  Lwt_list.map_p Dns_service.ip_of_name [nx; ny] >>= fun ips ->
   let ipx = List.hd ips
   and ipy = List.hd @@ List.tl ips in
   Interfaces.from_same_network t.interfaces ipx ipy >>= function
   | false ->
       add_pair t nx ny >>= fun () ->
+      if List.exists (fun e -> PrivilegedSet.mem e t.privileged) [DstHost nx; DstHost ny]
+      then Lwt.return_unit else
       (* dns request from ipx for ny should return ipy' *)
       (* dns request from ipy for nx should return ipx' *)
       Interfaces.acquire_fake_dst t.interfaces ipx >>= fun ipy' ->
@@ -135,45 +146,47 @@ let disconnect t n ip =
   Log.info (fun m -> m "Policy.disconnect %s" n)
 
 
-let allow_privileged t src_ip =
-  t.privileged <- IpSet.add src_ip t.privileged;
-  Log.info (fun m -> m "allow privileged: %a" pp_ip src_ip)
+let allow_privileged_ip t src_ip =
+  t.privileged <- PrivilegedSet.add (SrcIP src_ip) t.privileged;
+  Log.info (fun m -> m "allow privileged IP: %a" pp_ip src_ip)
 
+let allow_privileged_host t name =
+  t.privileged <- PrivilegedSet.add (DstHost name) t.privileged;
+  Log.info (fun m -> m "allow privileged hostname: %s" name)
 
 let is_authorized_transport {transport; _} ipx ipy =
   IpPairSet.mem (ipx, ipy) transport
 
 
-let is_privileged_resolve t src_ip name =
-  if IpSet.mem src_ip t.privileged then
-    Dns_service.ip_of_name name >>= fun dst_ip ->
-    Interfaces.from_same_network t.interfaces src_ip dst_ip >>= function
-    | true ->
-        allow_resolve t src_ip name dst_ip >>= fun () ->
-        Lwt.return (Ok (src_ip, dst_ip))
-    | false ->
-        Interfaces.acquire_fake_dst t.interfaces src_ip >>= fun dst_ip' ->
-        Interfaces.acquire_fake_dst t.interfaces dst_ip >>= fun src_ip' ->
-        allow_resolve t src_ip name dst_ip' >>= fun () ->
-        allow_transport t src_ip dst_ip' >>= fun () ->
-        allow_transport t dst_ip src_ip' >>= fun () ->
-        Nat.add_rule t.nat (src_ip, dst_ip') (src_ip', dst_ip) >>= fun () ->
-        Nat.add_rule t.nat (dst_ip, src_ip') (dst_ip', src_ip) >>= fun () ->
-        Lwt.return (Ok (src_ip, dst_ip'))
-  else Lwt.return (Error src_ip)
+let connect_for_privileged t src_ip name =
+  Dns_service.ip_of_name name >>= fun dst_ip ->
+  Interfaces.from_same_network t.interfaces src_ip dst_ip >>= function
+  | true ->
+      allow_resolve t src_ip name dst_ip >>= fun () ->
+      Lwt.return (Ok (src_ip, dst_ip))
+  | false ->
+      Interfaces.acquire_fake_dst t.interfaces src_ip >>= fun dst_ip' ->
+      Interfaces.acquire_fake_dst t.interfaces dst_ip >>= fun src_ip' ->
+      allow_resolve t src_ip name dst_ip' >>= fun () ->
+      allow_transport t src_ip dst_ip' >>= fun () ->
+      allow_transport t dst_ip src_ip' >>= fun () ->
+      Nat.add_rule t.nat (src_ip, dst_ip') (src_ip', dst_ip) >>= fun () ->
+      Nat.add_rule t.nat (dst_ip, src_ip') (dst_ip', src_ip) >>= fun () ->
+      Lwt.return (Ok (src_ip, dst_ip'))
 
 
 let is_authorized_resolve t ip name =
-  if IpMap.mem ip t.resolve then
-    let names = IpMap.find ip t.resolve in
-    if List.mem_assoc name names then Lwt.return @@ Ok (ip, List.assoc name names)
-    else is_privileged_resolve t ip name
-  else is_privileged_resolve t ip name
+  if IpMap.mem ip t.resolve && List.mem_assoc name @@ IpMap.find ip t.resolve then
+    Lwt.return @@ Ok (ip, List.assoc name @@ IpMap.find ip t.resolve)
+  else if PrivilegedSet.mem (SrcIP ip) t.privileged ||
+          PrivilegedSet.mem (DstHost name) t.privileged then
+    connect_for_privileged t ip name
+  else Lwt.return @@ Error ip
 
 
 let create interfaces nat =
   let pairs = DomainPairSet.empty in
-  let privileged = IpSet.empty in
+  let privileged = PrivilegedSet.empty in
   let transport = IpPairSet.empty in
   let resolve = IpMap.empty in
   {pairs; privileged; transport; resolve; interfaces; nat}

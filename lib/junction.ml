@@ -153,7 +153,7 @@ module Local = struct
             let dict = get_dict (value obj) in
             let src_ip_str = List.assoc "src_ip" dict |> get_string in
             let src_ip = Ipaddr.V4.of_string_exn src_ip_str in
-            Policy.allow_privileged po src_ip >>= fun () ->
+            Policy.allow_privileged_ip po src_ip >>= fun () ->
             Lwt.return (`OK, `Json (`O []))
           with e -> Lwt.fail e) (fun e ->
           let msg = Printf.sprintf "/privileged server err: %s" (Printexc.to_string e) in
@@ -265,4 +265,6 @@ let create intf_st =
         Interfaces.deregister_intf interfaces dev >>= fun () ->
         junction_lp ()
     in
+
+  Policy.allow_privileged_host policy "arbiter" >>= fun () ->
   Lwt.return junction_lp
