@@ -12,14 +12,14 @@ module DomainPairSet = Set.Make(struct
       else Pervasives.compare (xx, xy) (yx, yy)
   end)
 
-type privileged = SrcIP of Ipaddr.V4.t | DstHost of string
+type privileged = SrcIP of Ipaddr.V4.t | DstHost of string | Network of Ipaddr.V4.Prefix.t
 module PrivilegedSet = Set.Make(struct
   type t = privileged
   let compare x y = match x, y with
     | SrcIP a, SrcIP b -> Ipaddr.V4.compare a b
     | DstHost a, DstHost b -> Pervasives.compare a b
-    | SrcIP _, DstHost _ -> 1
-    | DstHost _, SrcIP _ -> -1
+    | Network a, Network b -> Ipaddr.V4.Prefix.compare a b
+    | _, _ -> 1
 end)
 
 type t = {
@@ -156,6 +156,14 @@ let allow_privileged_host t name =
   t.privileged <- PrivilegedSet.add (DstHost name) t.privileged;
   Log.info (fun m -> m "allow privileged hostname: %s" name)
 
+let allow_privileged_network t net =
+  t.privileged <- PrivilegedSet.add (Network net) t.privileged;
+  Log.info (fun m -> m "allow privileged network: %a" Ipaddr.V4.Prefix.pp_hum net)
+
+let disallow_privileged_network t net =
+  t.privileged <- PrivilegedSet.remove (Network net) t.privileged;
+  Log.info (fun m -> m "disallow privileged network: %a" Ipaddr.V4.Prefix.pp_hum net)
+
 let is_authorized_transport {transport; _} ipx ipy =
   IpPairSet.mem (ipx, ipy) transport
 
@@ -177,12 +185,17 @@ let connect_for_privileged t src_ip name =
       Nat.add_rule t.nat (dst_ip, src_ip') (dst_ip', src_ip) >>= fun () ->
       Lwt.return (Ok (src_ip, dst_ip'))
 
+let is_from_privileged_net t ip =
+  PrivilegedSet.exists (function
+      | Network net -> Ipaddr.V4.Prefix.mem ip net
+      | _ -> false) t.privileged
 
 let is_authorized_resolve t ip name =
   if IpMap.mem ip t.resolve && List.mem_assoc name @@ IpMap.find ip t.resolve then
     Lwt.return @@ Ok (ip, List.assoc name @@ IpMap.find ip t.resolve)
   else if PrivilegedSet.mem (SrcIP ip) t.privileged ||
-          PrivilegedSet.mem (DstHost name) t.privileged then
+          PrivilegedSet.mem (DstHost name) t.privileged ||
+          is_from_privileged_net t ip then
     connect_for_privileged t ip name
   else Lwt.return @@ Error ip
 

@@ -144,7 +144,7 @@ module Local = struct
     in
     post "/disconnect" disconnect_handler
 
-  let add_privileged po =
+  let add_privileged po network =
     let add_privileged_handler = fun req ->
       Lwt.catch (fun () ->
           json_of_body_exn req >>= fun obj ->
@@ -154,6 +154,7 @@ module Local = struct
             let src_ip_str = List.assoc "src_ip" dict |> get_string in
             let src_ip = Ipaddr.V4.of_string_exn src_ip_str in
             Policy.allow_privileged_ip po src_ip >>= fun () ->
+            Policy.disallow_privileged_network po network >>= fun () ->
             Lwt.return (`OK, `Json (`O []))
           with e -> Lwt.fail e) (fun e ->
           let msg = Printf.sprintf "/privileged server err: %s" (Printexc.to_string e) in
@@ -170,7 +171,7 @@ module Local = struct
    let callback = callback_of_routes [
         connect_for po;
         disconnect_for po;
-        add_privileged po;
+        add_privileged po t.network;
         get_status;
       ] in
     start t.service ~callback
@@ -242,6 +243,7 @@ let create intf_st =
     | None -> Log.warn (fun m -> m "monitor stream closed!" )
     | Some (`Up (intf, intf_starter)) ->
         if intf.Intf.dev = "eth0" then
+          Policy.allow_privileged_network policy intf.Intf.network >>= fun () ->
           Local.initialize intf policy >>= fun service_starter ->
           register_and_start intf intf_starter >>= fun () ->
           Log.info (fun m -> m "start local service on %s..." intf.Intf.dev) >>= fun () ->
