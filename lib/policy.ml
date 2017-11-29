@@ -88,7 +88,7 @@ let process_pair_connection t nx ny =
   else
     add_pair t nx ny >>= fun () ->
     if List.exists (fun e -> PrivilegedSet.mem e t.privileged) [DstHost nx; DstHost ny]
-    then Lwt.return_unit
+    then Log.info (fun m -> m "Policy.connect skip privileged hostname %s|%s" nx ny)
     else
       Lwt_list.map_p Dns_service.ip_of_name [nx; ny] >>= fun ips ->
       let ipx = List.hd ips
@@ -107,20 +107,18 @@ let process_pair_connection t nx ny =
           allow_transport t ipy ipx' >>= fun () ->
           Nat.add_rule t.nat (ipx, ipy') (ipx', ipy) >>= fun () ->
           Nat.add_rule t.nat (ipy, ipx') (ipy', ipx) >>= fun () ->
-          Lwt.return_unit
+          Log.info (fun m -> m "Policy.connect %s <> %s" nx ny)
       | true ->
           (* nx ny are in the same network *)
           (* DNS returns true IP directly, no NAT, no transport *)
           allow_resolve t ipx ny ipy >>= fun () ->
           allow_resolve t ipy nx ipx >>= fun () ->
-          Lwt.return_unit
+          Log.info (fun m -> m "Policy.connect %s <> %s" nx ny)
 
 
 let connect t nx ny =
   Lwt.async (fun () ->
-    Lwt.catch (fun () ->
-      process_pair_connection t nx ny >>= fun () ->
-      Log.info (fun m -> m "Policy.connect %s <> %s" nx ny))
+    Lwt.catch (fun () -> process_pair_connection t nx ny)
       (function
       | Invalid_argument n ->
           Log.err (fun m -> m "Policy.connect unresolvable %s" n)
@@ -170,6 +168,7 @@ let is_authorized_transport {transport; _} ipx ipy =
 (* difference with pair_connection: name resolving is unidirectional, *)
 (* `allow_resolve` only called once here *)
 let connect_for_privileged t src_ip name =
+  Log.info (fun m -> m "Policy.connect_for_privileged %a <> %s" pp_ip src_ip name) >>= fun () ->
   Dns_service.ip_of_name name >>= fun dst_ip ->
   Interfaces.from_same_network t.interfaces src_ip dst_ip >>= function
   | true ->
