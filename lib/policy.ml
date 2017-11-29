@@ -126,12 +126,17 @@ let connect t nx ny =
   Lwt.return_unit
 
 let disconnect t n ip =
+  (* service n can't resolve others *)
   get_resolve t ip >>= fun resolve ->
-  Lwt_list.iter_p (fun (name, _) -> forbidden_resolve t ip name) resolve >>= fun () ->
+  Lwt_list.iter_s (fun (name, _) -> forbidden_resolve t ip name) resolve >>= fun () ->
+  (* others can't resolve n *)
+  Lwt_list.iter_s (fun (ip, resolves) ->
+    if not (List.mem_assoc n resolves) then Lwt.return_unit
+    else forbidden_resolve t ip n) (IpMap.bindings t.resolve) >>= fun () ->
   get_related_peers t n >>= fun peers ->
-  Lwt_list.iter_p (fun peer -> remove_pair t n peer) peers >>= fun () ->
+  Lwt_list.iter_s (fun peer -> remove_pair t n peer) peers >>= fun () ->
   Nat.get_rule_handles t.nat ip >>= fun handles ->
-  Lwt_list.iter_p (fun handle ->
+  Lwt_list.iter_s (fun handle ->
       let translation = Nat.get_translation t.nat handle in
       let src, dst = handle in
       forbidden_transport t src dst >>= fun () ->
@@ -167,7 +172,7 @@ let is_authorized_transport {transport; _} ipx ipy =
 
 (* difference with pair_connection: name resolving is unidirectional, *)
 (* `allow_resolve` only called once here *)
-let connect_for_privileged t src_ip name =
+let connect_for_privileged_exn t src_ip name =
   Log.info (fun m -> m "Policy.connect_for_privileged %a <> %s" pp_ip src_ip name) >>= fun () ->
   Dns_service.ip_of_name name >>= fun dst_ip ->
   Interfaces.from_same_network t.interfaces src_ip dst_ip >>= function
@@ -183,6 +188,13 @@ let connect_for_privileged t src_ip name =
       Nat.add_rule t.nat (src_ip, dst_ip') (src_ip', dst_ip) >>= fun () ->
       Nat.add_rule t.nat (dst_ip, src_ip') (dst_ip', src_ip) >>= fun () ->
       Lwt.return (Ok (src_ip, dst_ip'))
+
+let connect_for_privileged t src_ip name =
+  Lwt.catch (fun () -> connect_for_privileged_exn t src_ip name) (function
+    | Invalid_argument n ->
+        Log.err (fun m -> m "Policy.connect_for_privileged unresolvable %s" n) >>= fun () ->
+        Lwt.return @@ Error src_ip
+    | exn -> Lwt.fail exn)
 
 let is_from_privileged_net t ip =
   PrivilegedSet.exists (function
