@@ -124,7 +124,7 @@ stdio	v0.9.0	installed
 stringext	1.5.0	installed
 tcpip	3.3.0	root
 tls	0.8.0	installed
-topkg	0.9.0	installed
+topkg	0.9.1	installed
 travis-opam	1.0.3	root
 uchar	0.0.2	installed
 uri	1.9.4	installed
