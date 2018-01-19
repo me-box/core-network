@@ -14,3 +14,4 @@ val translate: t -> pair -> Cstruct.t * Frame.t -> (Ipaddr.V4.t * Ipaddr.V4.t * 
 
 val get_translation: t -> pair -> pair list
 
+val substitute: t -> Ipaddr.V4.t -> Ipaddr.V4.t -> unit Lwt.t

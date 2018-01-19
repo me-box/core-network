@@ -211,6 +211,48 @@ let is_authorized_resolve t ip name =
   else Lwt.return @@ Error ip
 
 
+(*
+* type t = {
+*   mutable pairs : DomainPairSet.t;
+*   mutable privileged: PrivilegedSet.t;
+*   mutable transport: IpPairSet.t;
+*   mutable resolve: (string * Ipaddr.V4.t) list IpMap.t;
+*   interfaces: Interfaces.t;
+*   nat: Nat.t;
+* }
+*)
+let substitute t name old_ip new_ip =
+  Log.info (fun m -> m "Policy.substititue %a for %a" pp_ip old_ip pp_ip new_ip) >>= fun () ->
+  if PrivilegedSet.mem (SrcIP old_ip) t.privileged then begin
+    PrivilegedSet.remove (SrcIP old_ip) t.privileged
+    |> PrivilegedSet.add (SrcIP new_ip)
+    |> fun npriv -> t.privileged <- t.privileged end;
+
+  let ntransp =
+    IpPairSet.fold (fun (_src_ip, _dst_ip) n ->
+      (if 0 = Ipaddr.V4.compare _src_ip old_ip then new_ip, _dst_ip
+      else if 0 = Ipaddr.V4.compare _dst_ip old_ip then _src_ip, new_ip
+      else _src_ip, _dst_ip)
+      |> fun np -> IpPairSet.add np n
+    ) t.transport IpPairSet.empty in
+  let () = t.transport <- ntransp in
+
+  let nresolv =
+    IpMap.fold (fun src_ip resolvs n ->
+      List.map (fun (_name, _dst_ip) ->
+        if 0 = Ipaddr.V4.compare _dst_ip old_ip then _name, new_ip
+        else _name, _dst_ip) resolvs
+      |> fun nresolvs ->
+        if 0 = Ipaddr.V4.compare src_ip old_ip then IpMap.add new_ip nresolvs n
+        else IpMap.add src_ip nresolvs n
+    ) t.resolve IpMap.empty in
+  let () = t.resolve <- nresolv in
+
+  Interfaces.substitute t.interfaces old_ip new_ip >>= fun () ->
+  Nat.substitute t.nat old_ip new_ip >>= fun () ->
+  Lwt.return_unit
+
+
 let create interfaces nat =
   let pairs = DomainPairSet.empty in
   let privileged = PrivilegedSet.empty in

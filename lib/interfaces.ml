@@ -131,7 +131,7 @@ let register_intf t intf dispatch_fn =
   | Some _ -> t.host <- Some intf);
   Lwt.return drain_pkt
 
-  let deregister_intf t dev =
+let deregister_intf t dev =
   let intf = ref None in
   IntfSet.iter (fun ({dev = dev'} as intf') ->
       if dev' = dev then intf := Some intf') t.interfaces;
@@ -145,6 +145,14 @@ let register_intf t intf dispatch_fn =
           intf'.Intf.dev <> intf.Intf.dev) t.intf_cache in
       t.intf_cache <- cleared_cache;
       Lwt.return_unit
+
+let substitute t old_ip new_ip =
+  if IpMap.mem old_ip t.intf_cache then
+    let intf = IpMap.find old_ip t.intf_cache in
+    let ncache = IpMap.add new_ip intf (IpMap.remove old_ip t.intf_cache) in
+    let () = t.intf_cache <- ncache in
+    Lwt.return_unit
+  else Lwt.return_unit
 
 let create () =
   let interfaces = IntfSet.empty in

@@ -94,6 +94,39 @@ let translate t p_orig (buf, pkt) =
       Lwt.return (src_ip, dst_ip, nat_buf, pkt)
   | _ -> not_expected "translate_operand"
 
+(*
+* type  t = {
+*   mutable translation: pair IpPairMap.t;
+*   mutable rule_handles: pair list IpMap.t;
+* }
+*)
+let substitute t old_ip new_ip =
+  let ntransl =
+    IpPairMap.fold (fun kp vp n ->
+      let nkp =
+        if 0 = Ipaddr.V4.compare (fst kp) old_ip
+        then new_ip, snd kp else kp in
+      let nvp =
+        if 0 = Ipaddr.V4.compare (snd vp) old_ip
+        then fst vp, new_ip else vp in
+      IpPairMap.add nkp nvp n
+    )t.translation IpPairMap.empty in
+  let () = t.translation <- ntransl in
+
+  let nhandles =
+    IpMap.fold (fun ip rules n ->
+      let nrules =
+        List.map (fun (_src_ip, _dst_ip) ->
+        if 0 = Ipaddr.V4.compare _src_ip old_ip then new_ip, _dst_ip
+        else if 0 = Ipaddr.V4.compare _dst_ip old_ip then _src_ip, new_ip
+        else _src_ip, _dst_ip) rules in
+      let nip =
+        if 0 = Ipaddr.V4.compare ip old_ip
+        then new_ip else ip in
+      IpMap.add nip nrules n
+    ) t.rule_handles IpMap.empty in
+  let () = t.rule_handles <- nhandles in
+  Lwt.return_unit
 
 let create () =
   let translation = IpPairMap.empty in

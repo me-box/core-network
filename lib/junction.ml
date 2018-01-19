@@ -144,6 +144,33 @@ module Local = struct
     in
     post "/disconnect" disconnect_handler
 
+  let service_restart po =
+    let service_request_handler = fun req ->
+    Lwt.catch (fun () ->
+      json_of_body_exn req >>= fun obj ->
+      try
+        let open Ezjsonm in
+        let dict = get_dict (value obj) in
+        let name = List.assoc "name" dict |> get_string in
+        let old_ip =
+          List.assoc "old_ip" dict
+          |> get_string
+          |> Ipaddr.V4.of_string_exn in
+        let new_ip =
+          List.assoc "new_ip" dict
+          |> get_string
+          |> Ipaddr.V4.of_string_exn in
+        Policy.substitute po name old_ip new_ip >>= fun () ->
+        let status = Cohttp.Code.(`OK) in
+        Lwt.return (status, `Json (`O []))
+      with e -> Lwt.fail e) (fun e ->
+      let msg = Printf.sprintf "/restart server err: %s" (Printexc.to_string e) in
+      let status = Cohttp.Code.(`Code 500) in
+      Lwt.return (status, `String msg)) >>= fun (code, body) ->
+      respond' ~code body
+    in
+    post "/restart" service_request_handler
+
   let add_privileged po network =
     let add_privileged_handler = fun req ->
       Lwt.catch (fun () ->
@@ -171,6 +198,7 @@ module Local = struct
    let callback = callback_of_routes [
         connect_for po;
         disconnect_for po;
+        service_restart po;
         add_privileged po t.network;
         get_status;
       ] in
