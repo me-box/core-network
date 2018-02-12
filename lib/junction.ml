@@ -247,7 +247,7 @@ module Dispatcher = struct
 end
 
 
-let create intf_st =
+let create ?fifo intf_st =
   let interfaces = Interfaces.create () in
   let nat = Nat.create () in
   let policy = Policy.create interfaces nat in
@@ -297,4 +297,5 @@ let create intf_st =
     in
 
   Policy.allow_privileged_host policy "arbiter" >>= fun () ->
-  Lwt.return junction_lp
+  Bcast.create ?fifo interfaces >>= fun bcast_starter ->
+  Lwt.return @@ fun () -> junction_lp () <&> bcast_starter ()

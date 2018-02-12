@@ -154,6 +154,53 @@ let substitute t old_ip new_ip =
     Lwt.return_unit
   else Lwt.return_unit
 
+
+let set_ipv4_checksum buf ihl =
+  let hd = Cstruct.sub buf 0 (4 * ihl) in
+  Ipv4_wire.set_ipv4_csum buf 0;
+  let csum = Tcpip_checksum.ones_complement hd in
+  Ipv4_wire.set_ipv4_csum buf csum
+
+let set_udp_checksum buf ph =
+  Udp_wire.set_udp_checksum buf 0;
+  let csum = Tcpip_checksum.ones_complement_list [ph; buf] in
+  Udp_wire.set_udp_checksum buf csum
+
+let set_tcp_checksum buf ph =
+  Tcp.Tcp_wire.set_tcp_checksum buf 0;
+  let csum = Tcpip_checksum.ones_complement_list [ph; buf] in
+  Tcp.Tcp_wire.set_tcp_checksum buf csum
+
+let with_ip_dst dst_ip pkt =
+  let not_expected log =
+    Log.err (fun m -> m "%s not expected value in with_ip_dst" log) >>= fun () ->
+    Lwt.fail (Invalid_argument log) in
+  let open Frame in
+  match parse_ipv4_pkt pkt with
+  | Ok (Ipv4 {src; ihl; raw = nat_buf; payload}) ->
+      Ipv4_wire.set_ipv4_dst nat_buf (Ipaddr.V4.to_int32 dst_ip);
+      set_ipv4_checksum nat_buf ihl;
+      (match payload with
+      | Udp {len; raw = udp_buf} ->
+          let ph = Ipv4_packet.Marshal.pseudoheader ~src ~dst:dst_ip ~proto:`UDP len in
+          set_udp_checksum udp_buf ph
+      | Tcp {raw = tcp_buf} ->
+          let len = Cstruct.len tcp_buf in
+          let ph = Ipv4_packet.Marshal.pseudoheader ~src ~dst:dst_ip ~proto:`TCP len in
+          set_tcp_checksum tcp_buf ph
+      | Icmp _ -> ()
+      | _ -> Lwt.ignore_result @@ not_expected "ipv4_payload")
+  | _ -> Lwt.ignore_result @@ not_expected "translate_operand"
+
+let relay_bcast t pkt =
+  IntfSet.iter (fun intf ->
+    let dst = Ipaddr.V4.Prefix.broadcast intf.Intf.network in
+    let pkt_len = Cstruct.len pkt in
+    let pkt' = Cstruct.create pkt_len in
+    let () = Cstruct.blit pkt 0 pkt' 0 pkt_len in
+    let () = with_ip_dst dst pkt' in
+    intf.Intf.send_push (Some pkt')) t.interfaces
+
 let create () =
   let interfaces = IntfSet.empty in
   let intf_cache = IpMap.empty in

@@ -37,7 +37,7 @@ let host_net host_ip existed =
 
 let broadcast consume intf =
   let broad_dst = Ipaddr.V4.Prefix.broadcast intf.Intf.network in
-  let recvfrom intf =
+  let recvfrom intf buf =
     Lwt_stream.get intf.Intf.recv_st >>= function
     | Some pkt ->
       let dst = Ipv4_wire.get_ipv4_dst pkt |> Ipaddr.V4.of_int32 in
@@ -45,31 +45,31 @@ let broadcast consume intf =
         let buf_len = Cstruct.len pkt in
         let pkt_len = Ipv4_wire.get_ipv4_len pkt in
         Log.debug (fun m -> m "got one broadcast pkt: %d %d" pkt_len buf_len) >>= fun () ->
-        consume pkt
+        consume pkt buf
       else Lwt.return_unit
     | None -> Log.warn (fun m -> m "recv stream from %s closed!" intf.Intf.dev) in
-  let rec loop () =
-    recvfrom intf
-    >>= loop in
-  loop ()
+  let rec loop buf () =
+    recvfrom intf buf
+    >>= loop buf in
+  let buf = Cstruct.create 4096 in
+  loop buf ()
 
 (* name: absolute path *)
 let open_fifo name =
   (*check for existence and file type*)
-  let fd = Unix.openfile name [Unix.O_WRONLY] 0o640 in
-  Lwt.return fd
+  Lwt_unix.openfile name [Unix.O_WRONLY] 0o640
 
-let write_fifo fd buf =
-  let buff = Cstruct.to_string buf in
-  let len = Cstruct.len buf in
-  let cnt = ref 0 in
-  try
-    while !cnt < len do
-      let wcnt = Unix.write fd buff !cnt (len - !cnt) in
-      cnt := !cnt + wcnt
-    done;
-    Lwt.return_unit
-  with err -> Lwt.fail err
+let write_fifo fd pkt buf =
+  let len = Cstruct.len pkt in
+  let () = Cstruct.BE.set_uint16 buf 0 len in
+  let () = Cstruct.blit pkt 0 buf 2 len in
+  let wbuf = Cstruct.set_len buf (2 + len) in
+  let rec write chk =
+    let clen = Cstruct.len chk in
+    Lwt_cstruct.write fd chk >>= fun wlen ->
+    if clen = wlen then Lwt.return_unit
+    else write (Cstruct.shift chk wlen) in
+  write wbuf
 
 let start host_ip fd =
   existed_intf ()

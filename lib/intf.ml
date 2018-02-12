@@ -56,6 +56,12 @@ let rec write_intf t eth arp send_st =
         Log.err (fun m -> m "%s(%a without gateway) nowhere to send pkt with dst:%a"
             t.dev Ipaddr.V4.Prefix.pp_hum t.network Ipaddr.V4.pp_hum dst) >>= fun () ->
         write_intf t eth arp send_st
+      else if dst = Ipaddr.V4.Prefix.broadcast t.network then
+        let dst_mac = Macaddr.broadcast in
+        let hd = Pkt.eth_hd src_mac dst_mac Ethif_wire.IPv4 in
+        Ethif.writev eth [hd; ipv4_pkt] >>= (function
+          | Ok () -> Lwt.return_unit
+          | Error e -> Log.err (fun m -> m "%s Ethif.writev %a" t.dev Ethif.pp_error e))
       else
         let query_ip =
           if Ipaddr.V4.Prefix.mem dst t.network then dst

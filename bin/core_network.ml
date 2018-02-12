@@ -13,7 +13,7 @@ let print_async_exn () =
   Lwt.async_exception_hook := hook'
 
 
-let main logs =
+let main fifo logs =
   let open Lwt.Infix in
   Utils.Log.set_up_logs logs >>= fun () ->
   Monitor.create () >>= fun (intf_st, monitor_starter) ->
@@ -21,7 +21,7 @@ let main logs =
   Lwt.async monitor_starter;
   Lwt_unix.sleep 0.5 >>= fun () ->
   Log.info (fun m -> m "starting junction...") >>= fun () ->
-  Junction.create intf_st >>= fun junction_starter ->
+  Junction.create ?fifo intf_st >>= fun junction_starter ->
   junction_starter ()
 
 
@@ -37,9 +37,13 @@ let logs =
     `Src "interfaces", Logs.Info;] in
   Arg.(value & opt (list Utils.Log.log_threshold) src_levels & info ["l"; "logs"] ~doc ~docv:"LEVEL")
 
+let fifo_name =
+  let doc = "absolute path to fifo to read broadcast packet from" in
+  Arg.(value & opt (some string) None & info ["f"; "file"] ~doc ~docv:"FIFO")
+
 let cmd =
   let doc = "databox-bridge core-network" in
-  Term.(const main $ logs),
+  Term.(const main $ fifo_name $ logs),
   Term.info "bridge" ~doc ~man:[]
 
 let () =
