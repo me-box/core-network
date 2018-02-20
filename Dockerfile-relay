@@ -1,5 +1,4 @@
-#FROM databoxsystems/base-image-ocaml:alpine-3.4_ocaml-4.04.2 as BUILDER
-FROM ocaml/opam:alpine-3.6_ocaml-4.04.2 as BUILDER
+FROM ocaml/opam:alpine-3.6_ocaml-4.04.2 as builder
 
 WORKDIR /core-network
 ADD core-network.export core-network.export
@@ -10,18 +9,15 @@ RUN sudo apk update && sudo apk add alpine-sdk bash gmp-dev perl autoconf linux-
     opam switch import core-network.export
 
 ADD . .
-RUN sudo chown opam: -R . && opam config exec -- jbuilder build bin/core_network.exe
+RUN sudo chown opam: -R . && opam config exec -- jbuilder build bin/relay.exe
 
 
 FROM alpine:3.6
 
 WORKDIR /core-network
-ADD start.sh start.sh
 RUN apk update && apk add bash gmp-dev iptables iproute2 tcpdump
-COPY --from=BUILDER /core-network/_build/default/bin/core_network.exe core-network
+COPY --from=builder /core-network/_build/default/bin/relay.exe bcast-relay
 
-EXPOSE 8080
+LABEL databox.type="core-network-broadcast-relay"
 
-LABEL databox.type="core-network"
-
-ENTRYPOINT ["./start.sh"]
+ENTRYPOINT ["./bcast-relay"]
