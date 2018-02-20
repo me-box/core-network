@@ -37,6 +37,7 @@ let create ?fifo interfaces =
     let rec relay_lp () =
       Lwt_stream.get pkt_stm >>= function
       | Some pkt ->
+          Log.debug (fun m -> m "got one broadcast pkt: %d" (Cstruct.len pkt)) >>= fun () ->
           Interfaces.relay_bcast interfaces pkt;
           relay_lp ()
       | None -> Lwt.return_unit in

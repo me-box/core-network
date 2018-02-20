@@ -194,12 +194,13 @@ let with_ip_dst dst_ip pkt =
 
 let relay_bcast t pkt =
   IntfSet.iter (fun intf ->
-    let dst = Ipaddr.V4.Prefix.broadcast intf.Intf.network in
-    let pkt_len = Cstruct.len pkt in
-    let pkt' = Cstruct.create pkt_len in
-    let () = Cstruct.blit pkt 0 pkt' 0 pkt_len in
-    let () = with_ip_dst dst pkt' in
-    intf.Intf.send_push (Some pkt')) t.interfaces
+    if intf.Intf.gateway <> None then () else
+      let dst = Ipaddr.V4.Prefix.broadcast intf.Intf.network in
+      let pkt_len = Cstruct.len pkt in
+      let pkt' = Cstruct.create pkt_len in
+      let () = Cstruct.blit pkt 0 pkt' 0 pkt_len in
+      let () = with_ip_dst dst pkt' in
+      intf.Intf.send_push (Some pkt')) t.interfaces
 
 let create () =
   let interfaces = IntfSet.empty in

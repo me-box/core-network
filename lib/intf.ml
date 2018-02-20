@@ -62,6 +62,7 @@ let rec write_intf t eth arp send_st =
         Ethif.writev eth [hd; ipv4_pkt] >>= (function
           | Ok () -> Lwt.return_unit
           | Error e -> Log.err (fun m -> m "%s Ethif.writev %a" t.dev Ethif.pp_error e))
+        >>= fun () -> write_intf t eth arp send_st
       else
         let query_ip =
           if Ipaddr.V4.Prefix.mem dst t.network then dst

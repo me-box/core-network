@@ -8,7 +8,7 @@ let existed_intf () =
   let command = "ip", [|"ip"; "address"; "show"|] in
   let st = Lwt_process.pread_lines command in
   Lwt_stream.to_list st >>= fun lines ->
-  let regex = "inet (([0-9]+.){3}[0-9]+/[0-9]+) .*(eth[0-9]+)$" in
+  let regex = "inet (([0-9]+.){3}[0-9]+/[0-9]+) .* ([a-zA-Z0-9_]+)$" in
   let re = Re_posix.(regex |> re |> compile) in
   List.fold_left (fun acc line ->
       try let groups = Re.exec re line |> Re.Group.all in
@@ -19,7 +19,7 @@ let existed_intf () =
   |> fun existed ->
   Log.info (fun m -> m "found %d existed phy interfaces" (List.length existed)) >>= fun () ->
   Lwt_list.iter_p (fun (dev, cidr_addr) ->
-    Log.info (fun m -> m "%s: %s" dev cidr_addr)) existed >>= fun () ->
+    Log.debug (fun m -> m "%s: %s" dev cidr_addr)) existed >>= fun () ->
   Lwt.return existed
 
 let host_net host_ip existed =
@@ -30,6 +30,7 @@ let host_net host_ip existed =
   |> fun hosts ->
     if 0 <> List.length hosts then
       let dev, cidr = List.hd hosts in
+      Log.info (fun m -> m "Creat Intf with %s %s" dev cidr) >>= fun () ->
       Intf.create ~dev ~cidr
     else
       Log.err (fun m -> m "no interface with address %s found" host_ip)
@@ -42,9 +43,8 @@ let broadcast consume intf =
     | Some pkt ->
       let dst = Ipv4_wire.get_ipv4_dst pkt |> Ipaddr.V4.of_int32 in
       if 0 = Ipaddr.V4.compare dst broad_dst then
-        let buf_len = Cstruct.len pkt in
         let pkt_len = Ipv4_wire.get_ipv4_len pkt in
-        Log.debug (fun m -> m "got one broadcast pkt: %d %d" pkt_len buf_len) >>= fun () ->
+        Log.debug (fun m -> m "got one broadcast pkt: %d" pkt_len) >>= fun () ->
         consume pkt buf
       else Lwt.return_unit
     | None -> Log.warn (fun m -> m "recv stream from %s closed!" intf.Intf.dev) in
@@ -83,6 +83,7 @@ open Cmdliner
 let main host_ip fifo logs =
   Utils.Log.set_up_logs logs >>= fun () ->
   open_fifo fifo >>= fun fd ->
+  Log.info (fun m -> m "Opened %s for write bcast pkts." fifo) >>= fun () ->
   start host_ip fd
 
 let logs =
