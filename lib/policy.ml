@@ -201,9 +201,15 @@ let is_from_privileged_net t ip =
       | Network net -> Ipaddr.V4.Prefix.mem ip net
       | _ -> false) t.privileged
 
+let is_reverse_lookup name =
+  let regexp = Re_str.regexp ".in-addr.arpa" in
+  try let _ = Re_str.search_forward regexp name 0 in true
+  with Not_found -> false
+
 let is_authorized_resolve t ip name =
   if IpMap.mem ip t.resolve && List.mem_assoc name @@ IpMap.find ip t.resolve then
     Lwt.return @@ Ok (ip, List.assoc name @@ IpMap.find ip t.resolve)
+  else if is_reverse_lookup name then Lwt.return @@ Error ip
   else if PrivilegedSet.mem (SrcIP ip) t.privileged ||
           PrivilegedSet.mem (DstHost name) t.privileged ||
           is_from_privileged_net t ip then
