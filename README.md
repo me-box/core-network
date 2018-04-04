@@ -51,3 +51,15 @@ POST /disconnect
 intput: {"name":<string>, "ip":<string>}
 ```
 `name` is the service about to be removed, and `ip` is its IP address. core-container uses these to delete related states.
+
+
+```
+POST /restart
+intput: {"name":<string>, "old_ip":<string>, "new_ip":<string>}
+```
+`name` is the restarted service, and `old_ip` is its IP address before restart, `new_ip` is the new IP address after retart. core-network updates the policies accroding to this change.
+
+```
+GET /status
+```
+This returns a string `'active'`.
