@@ -10,7 +10,10 @@ dispatch function with these packets. All interfaces share the same dispatch fun
 and NAT is done. If there are packets to forward on, `Interfaces.t` takes over them, figures out which interface's
 output stream to push these packets in, and then let a `Intf.t` values handles the output of a packet.
 #### related code snippets
-[Intf.t]; [Interfaces.register_intf]; [Junction.Dispatcher.dispatch]; [Interfaces.to_push].
+- [Intf.t]
+- [Interfaces.register_intf]
+- [Junction.Dispatcher.dispatch]
+- [Interfaces.to_push].
 
 [Intf.t]: https://github.com/me-box/core-network/blob/bd1bc85710d3ead44fdd956d633b9ef38f26fa08/lib/intf.ml#L19-L31
 [Interfaces.register_intf]: https://github.com/me-box/core-network/blob/bd1bc85710d3ead44fdd956d633b9ef38f26fa08/lib/interfaces.ml#L108-L132
@@ -42,14 +45,17 @@ As communications are bi-directional, another fake address is also allocated tog
 When a packet with any of these two fake addresses comes in `core-network`, it knows how to replace the source/destination pair in the
 specific packet.
 #### related code snippets
-In databox/core-container-manager/src/container-manager.js, usage of argument `network` in function `[appConfig]`, `[driverConfig]`, and `[storeConfig]`;
-[Intf.fake_ip_op]; [Interfaces.acquire_fake_dst]; invocations of Interfaces.acquire_fake_dst and Nat.add_rule in [Policy.process_pair_connect], [Policy.connect_for_privileged_exn].
+- in databox/core-container-manager/src/container-manager.js, usage of argument `network` in function [appConfig], [driverConfig], and [storeConfig]
+- [Intf.fake_ip_op]
+- [Interfaces.acquire_fake_dst]
+- invocations of [Interfaces.acquire_fake_dst] and [Nat.add_rule] in [Policy.process_pair_connect], [Policy.connect_for_privileged_exn].
 
 [appConfig]: https://github.com/me-box/core-container-manager/blob/4ced8c8891832a936bc6fe4c3a3107ffbafa548c/src/container-manager.js#L441-L503
 [driverConfig]: https://github.com/me-box/core-container-manager/blob/4ced8c8891832a936bc6fe4c3a3107ffbafa548c/src/container-manager.js#L388-L439
 [storeConfig]: https://github.com/me-box/core-container-manager/blob/4ced8c8891832a936bc6fe4c3a3107ffbafa548c/src/container-manager.js#L505-L554
 [Intf.fake_ip_op]: https://github.com/me-box/core-network/blob/bd1bc85710d3ead44fdd956d633b9ef38f26fa08/lib/intf.ml#L97-L121
 [Interfaces.acquire_fake_dst]: https://github.com/me-box/core-network/blob/bd1bc85710d3ead44fdd956d633b9ef38f26fa08/lib/interfaces.ml#L95-L100
+[Nat.add_rule]: https://github.com/me-box/core-network/blob/bd1bc85710d3ead44fdd956d633b9ef38f26fa08/lib/nat.ml#L25-L35
 
 ### Control Policies
 #### name resolving and packet forward
@@ -96,10 +102,15 @@ before doing any acutal work, it is privileged in the sense that any resolving r
 for `arbiter` would be allowed, and in the handler of `/connect` metioned above, if the service name pair includes `arbiter`, this pair is skipped.
 The related policies are added only when the communication actually happens.
 #### related code snippets
-[Policy.t]; [Policy.is_authorized_transport]; [Policy.is_authorized_resolve]; [Junction.Local]; function [auth_middleware] in Server.Make;
-[Dns_service.ip_of_name] and its invocations in [Policy.process_pair_connect], [Policy.connect_for_privileged_exn];
-function [connectEndpoints] in databox/core-container-manager/src/lib/databox-network-helper.js,
-and its [invocation] in in databox/core-container-manager/src/container-manager.js; [Policy.connect].
+- [Policy.t]
+- [Policy.is_authorized_transport]
+- [Policy.is_authorized_resolve]
+- [Junction.Local]
+- function [auth_middleware] in Server.Make
+- [Dns_service.ip_of_name] and its invocations in [Policy.process_pair_connect], [Policy.connect_for_privileged_exn]
+- function [connectEndpoints] in databox/core-container-manager/src/lib/databox-network-helper.js,
+and its [invocation] in databox/core-container-manager/src/container-manager.js
+- [Policy.connect].
 
 [Policy.t]: https://github.com/me-box/core-network/blob/bd1bc85710d3ead44fdd956d633b9ef38f26fa08/lib/policy.ml#L25-L32
 [Policy.is_authorized_transport]: https://github.com/me-box/core-network/blob/bd1bc85710d3ead44fdd956d633b9ef38f26fa08/lib/policy.ml#L170-L171
@@ -142,8 +153,10 @@ through `eth0` is considered authorized during this phase.
 After `container-manager` coming in and identifying itself, the privileged status of `databox-system-net` is revoked, only leaves
 `container-manager` and `arbiter` as privileged entiites.
 #### related code snippets
-[Core_network.main]; function [junction_lp] in Junction.create; function [add_privileged] in Junction.Local; function [connect] in
-databox/core-container-manager/src/container-manager.js.
+- [Core_network.main]
+- function [junction_lp] in Junction.create
+- function [add_privileged] in Junction.Local
+- function [connect] in databox/core-container-manager/src/container-manager.js.
 
 [databox/databox-start]: https://github.com/me-box/databox/blob/ab44d422791ab3760b2dc01aeeda1179f14567df/databox-start#L192-L194
 [Core_network.main]: https://github.com/me-box/core-network/blob/bd1bc85710d3ead44fdd956d633b9ef38f26fa08/bin/core_network.ml#L16-L25
