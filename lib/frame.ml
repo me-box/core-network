@@ -20,7 +20,7 @@ let need_space_for buf n description =
   else Ok ()
 
 let parse_ipv4_pkt_exn inner =
-  need_space_for inner 16 "IP datagram"
+  need_space_for inner 20 "IP datagram"
   >>= fun () ->
   let vihl  = Cstruct.get_uint8     inner 0 in
   let len   = Cstruct.BE.get_uint16 inner (1 + 1) in
@@ -32,6 +32,14 @@ let parse_ipv4_pkt_exn inner =
   let ihl = vihl land 0xf in
   let raw = inner in
   need_space_for inner (4 * ihl) "IP options"
+  >>= fun () ->
+  ( match need_space_for inner len "IP packet" with
+  | Ok () -> Ok ()
+  | Error _ ->
+      let msg =
+        Printf.sprintf "jumbo %s %s %d"
+          (Ipaddr.V4.to_string src) (Ipaddr.V4.to_string dst) ihl in
+      Error (`Msg msg))
   >>= fun () ->
   let inner = Cstruct.sub inner (4 * ihl) (len - 4 * ihl) in
   ( match proto with

@@ -106,22 +106,29 @@ let release_fake_dst t fake_dst =
             intf.Intf.dev Ipaddr.V4.Prefix.pp_hum intf.Intf.network)
 
 let register_intf t intf dispatch_fn =
+  let notify_jumbo buf src dst ihl =
+    Log.warn (fun m -> m "jumbo packet(%d) %s <- %a"
+      (Cstruct.len buf) intf.Intf.dev pp_ip src) >>= fun () ->
+    let jumbo_hd = Cstruct.sub buf 0 (ihl * 4 + 8) in
+    let mtu_notification = Pkt.notify_mtu_pkt ~src:dst ~dst:src intf.mtu jumbo_hd in
+    intf.send_push (Some mtu_notification);
+    Lwt.return_unit in
   let rec drain_pkt () =
     Lwt_stream.get intf.recv_st >>= function
     | Some buf ->
         (match Frame.parse_ipv4_pkt buf with
         | Ok Frame.(Ipv4 {src; dst; ihl} as pkt) ->
             if Cstruct.len buf > intf.mtu then
-              Log.warn (fun m -> m "jumbo packet(%d) %s <- %a"
-                (Cstruct.len buf) intf.Intf.dev pp_ip src) >>= fun () ->
-              let jumbo_hd = Cstruct.sub buf 0 (ihl * 4 + 8) in
-              let mtu_notification = Pkt.notify_mtu_pkt ~src:dst ~dst:src intf.mtu jumbo_hd in
-              intf.send_push (Some mtu_notification);
-              Lwt.return_unit
+              notify_jumbo buf src dst ihl
             else if Ipaddr.V4.is_multicast dst then
               Log.debug (fun m -> m "drop multicast packets %s <- %a" intf.Intf.dev pp_ip src)
             else dispatch_fn (buf, pkt)
-        | Ok Frame.Unknown | Error _ -> Log.warn (fun m -> m "unparsable pkt from %s" intf.dev)
+        | Error (`Msg msg) ->
+            (match String.split_on_char ' ' msg with
+            | "jumbo" :: src :: dst :: ihl :: [] ->
+                notify_jumbo buf (Ipaddr.V4.of_string_exn src) (Ipaddr.V4.of_string_exn dst) (int_of_string ihl)
+            | _ ->
+                Log.warn (fun m -> m "unparsable pkt from %s (len:%d) %s" intf.dev (Cstruct.len buf) msg))
         | Ok (_  as pkt) -> Log.warn (fun m -> m "not ipv4 pkt: %s" (Frame.fr_info pkt)))
         >>= fun () -> drain_pkt ()
     | None -> Log.warn (fun m -> m "stream from %s closed!" intf.dev) in
