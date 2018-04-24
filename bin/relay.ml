@@ -32,9 +32,11 @@ let host_net host_ip existed =
       let dev, cidr = List.hd hosts in
       Log.info (fun m -> m "Creat Intf with %s %s" dev cidr) >>= fun () ->
       Intf.create ~dev ~cidr
+      >>= Lwt.return_some
     else
-      Log.err (fun m -> m "no interface with address %s found" host_ip)
-      >>= fun () -> Lwt.fail_invalid_arg host_ip
+      Log.warn (fun m -> m "no interface with address %s found" host_ip) >>= fun () ->
+      Log.warn (fun m -> m "broadcast relay not supported") >>= fun () ->
+      Lwt.return_none
 
 let broadcast consume intf =
   let broad_dst = Ipaddr.V4.Prefix.broadcast intf.Intf.network in
@@ -71,12 +73,6 @@ let write_fifo fd pkt buf =
     else write (Cstruct.shift chk wlen) in
   write wbuf
 
-let start host_ip fd =
-  existed_intf ()
-  >>= host_net host_ip
-  >>= fun (intf, intf_starter) ->
-  broadcast (write_fifo fd) intf <&> intf_starter ()
-
 
 open Cmdliner
 
@@ -84,11 +80,16 @@ let main host_ip fifo logs =
   Utils.Log.set_up_logs logs >>= fun () ->
   open_fifo fifo >>= fun fd ->
   Log.info (fun m -> m "Opened %s for write bcast pkts." fifo) >>= fun () ->
-  start host_ip fd
+  existed_intf () >>= host_net host_ip >>= function
+  | Some (intf, intf_starter) ->
+      broadcast (write_fifo fd) intf <&> intf_starter ()
+  | None ->
+      let t, _ = Lwt.wait () in
+      t
 
 let logs =
   let doc = "set source-dependent logging level, eg: --logs *:info,foo:debug" in
-  let src_levels = [`Src "relay", Logs.Info] in
+  let src_levels = [`Src "relay", Logs.Debug] in
   Arg.(value & opt (list Utils.Log.log_threshold) src_levels & info ["l"; "logs"] ~doc ~docv:"LEVEL")
 
 let host =

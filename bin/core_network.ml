@@ -28,6 +28,7 @@ let main fifo logs =
 let logs =
   let doc = "set source-dependent logging level, eg: --logs *:info,foo:debug" in
   let src_levels = [
+    `Src "bcast",      Logs.Info;
     `Src "core",       Logs.Info;
     `Src "junction",   Logs.Info;
     `Src "dns",        Logs.Info;
