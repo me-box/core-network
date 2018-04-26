@@ -1,7 +1,7 @@
 (jbuild_version 1)
 
-(executable
-  ((name core_network)
+(executables
+  ((names (core_network relay))
    (libraries
      (lib_core_network
       lwt lwt.unix logs cmdliner))))

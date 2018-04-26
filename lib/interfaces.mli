@@ -17,3 +17,5 @@ val from_same_network: t -> Ipaddr.V4.t -> Ipaddr.V4.t -> bool Lwt.t
 val to_push: t -> Ipaddr.V4.t -> Cstruct.t -> unit Lwt.t
 
 val substitute: t -> Ipaddr.V4.t -> Ipaddr.V4.t -> unit Lwt.t
+
+val relay_bcast: t -> Cstruct.t -> unit
