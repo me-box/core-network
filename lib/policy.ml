@@ -32,6 +32,7 @@ type t = {
 }
 
 let pp_ip = Ipaddr.V4.pp_hum
+let str_ip = Ipaddr.V4.to_string
 
 let get_related_peers t n =
   DomainPairSet.fold (fun (nx, ny) acc ->
@@ -217,6 +218,15 @@ let is_authorized_resolve t ip name =
   else Lwt.return @@ Error ip
 
 
+let string_of_resolve t =
+  List.map (fun (ip,resovles) ->
+    let str_resolves =
+      List.map (fun (name,resolved) ->
+        Printf.sprintf "\t%s reosolved as %s" name (str_ip resolved)) resovles
+      |> String.concat "\n" in
+    Printf.sprintf "for queries from %s:\n%s" (str_ip ip) str_resolves) (IpMap.bindings t.resolve)
+  |> String.concat "\n"
+
 (*
 * type t = {
 *   mutable pairs : DomainPairSet.t;
@@ -245,6 +255,7 @@ let substitute t name old_ip new_ip =
 
   let nresolv =
     IpMap.fold (fun src_ip resolvs n ->
+      if 0 = Ipaddr.V4.compare src_ip new_ip then n else
       List.map (fun (_name, _dst_ip) ->
         if 0 = Ipaddr.V4.compare _dst_ip old_ip then _name, new_ip
         else _name, _dst_ip) resolvs
@@ -256,6 +267,7 @@ let substitute t name old_ip new_ip =
 
   Interfaces.substitute t.interfaces old_ip new_ip >>= fun () ->
   Nat.substitute t.nat old_ip new_ip >>= fun () ->
+  Log.debug (fun m -> m "Policy.substitute:\n%s" (string_of_resolve t)) >>= fun () ->
   Lwt.return_unit
 
 
