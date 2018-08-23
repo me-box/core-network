@@ -9,8 +9,9 @@ type t =
   | Unknown:  t
 
 val parse: Cstruct.t -> (t, [ `Msg of string]) Result.result
-(** [parse buffers] parses the frame in [buffers] *)
+(** [parse buffer] expects [buffer] to be an entire ethernet frame. *)
 
 val parse_ipv4_pkt: Cstruct.t -> (t, [ `Msg of string]) Result.result
+(** [parse_ipv4_pkt buffer] expects [buffer] to be an IP packet. *)
 
 val fr_info: t -> string

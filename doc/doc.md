@@ -163,3 +163,31 @@ After `container-manager` coming in and identifying itself, the privileged statu
 [junction_lp]: https://github.com/me-box/core-network/blob/bd1bc85710d3ead44fdd956d633b9ef38f26fa08/lib/junction.ml#L269-L296
 [add_privileged]: https://github.com/me-box/core-network/blob/bd1bc85710d3ead44fdd956d633b9ef38f26fa08/lib/junction.ml#L174-L191
 [connect]: https://github.com/me-box/core-container-manager/blob/4ced8c8891832a936bc6fe4c3a3107ffbafa548c/src/container-manager.js#L728-L738
+
+
+### Relay of broadcast traffic
+This is done by another service `core-network-relay`, whose entrypoint could be found in `bin/relay.ml`.
+During the starting phase of Databox, a named pipe is created on the host machine, with the path `/tmp/databox_relay`.
+This named pipe is bind mounted both into `core-network` and `core-network-relay`. `core-network-relay` writes broadcast
+packets into this pipe, and `core-network` read from it.
+
+The service's container is started with `host` network mode/driver, which means that all the host's network interfaces are mirrored
+into this container. So this service could have access to the broadcast packets from one of the host's interfaces. As stated by the
+[official doc], the host network driver is only available on Linux hosts, so this feature of broadcast packets relay
+is only enabled on Linux hosts. When filtering out the broadcast packets, for the time being, only packets with subnet broadcast address are picked out, [as shown in the function `broadcast`] in `bin/relay.ml`. Then those packets are written into the pipe after being tagged with the length of each individual packet.
+
+Whenever `core-network` gets a packet from the pipe, it duplicates the packet and then sends to all the networks it connects to,
+except the `eth1` interface, which is intended only to provide external connections.
+And the source and destination address of the packet are also altered before transmission, respectively, to `core-network`'s address on that
+specific network and to that specific subnet's broadcast address.
+
+#### related code snippets:
+- [Relay.broadcast]
+- function [relay_lp] in Bcast.create
+- [Interfaces.relay_bcast]
+
+[official doc]: https://docs.docker.com/network/host/
+[as shown in the function `broadcast`]: https://github.com/me-box/core-network/blob/18762f9cb0b3eea15104683c409f23f470acf113/bin/relay.ml#L47
+[Relay.broadcast]: https://github.com/me-box/core-network/blob/18762f9cb0b3eea15104683c409f23f470acf113/bin/relay.ml#L41-L57
+[relay_lp]: https://github.com/me-box/core-network/blob/18762f9cb0b3eea15104683c409f23f470acf113/lib/bcast.ml#L37-L43
+[Interfaces.relay_bcast]: https://github.com/me-box/core-network/blob/18762f9cb0b3eea15104683c409f23f470acf113/lib/interfaces.ml#L196-L204
