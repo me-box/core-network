@@ -1,0 +1,37 @@
+FROM jptmoore/alpine-baseimage-aarch64
+
+USER databox
+RUN sudo apk add libffi-dev libressl-dev linux-headers bash autoconf
+RUN opam remove ezirmin irmin re.1.7.1 bos lwt
+RUN opam pin add -n mirage-net-psock.0.1.0 https://github.com/sevenEng/mirage-net-psock.git
+
+ADD core-network.export core-network.export
+RUN opam switch import core-network.export
+
+# add the code
+ADD bin bin
+RUN sudo chown -R databox:nogroup bin
+ADD lib lib
+RUN sudo chown -R databox:nogroup lib
+
+# setup ocaml
+RUN opam config exec -- jbuilder build bin/relay.exe \
+&& rm -rf /home/databox/bin \
+&& rm -rf /home/databox/lib \  
+&& rm -rf /home/databox/.opam \
+&& rm -rf /home/databox/opam-repository \
+&& sudo apk del .build-deps
+
+FROM resin/aarch64-alpine:3.5
+
+USER root
+WORKDIR /home/databox/
+COPY --from=0 /home/databox/ .
+RUN cp ./_build/default/bin/relay.exe ./bcast-relay
+# runtime dependencies
+RUN apk update && apk upgrade \
+&& apk add bash gmp-dev iptables iproute2 tcpdump
+
+LABEL databox.type="core-network-broadcast-relay"
+
+ENTRYPOINT ["./bcast-relay"]
