@@ -12,7 +12,8 @@ RUN sudo apk update && sudo apk add alpine-sdk bash gmp-dev perl autoconf linux-
     opam switch import core-network.export
 
 ADD . .
-RUN sudo chown opam: -R . && opam config exec -- jbuilder build bin/core_network.exe
+RUN opam remove jbuilder && opam install dune lwt cstruct dns ipaddr mirage-conduit mirage-http mirage-logs mirage-net-psock mirage-unix mirage-vnetif nocrypto opium_kernel tcpip tls
+RUN sudo chown opam: -R . && opam config exec -- dune build bin/core_network.exe
 
 
 FROM alpine:3.6
