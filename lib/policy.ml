@@ -295,19 +295,19 @@ let string_of_resolve t =
 *   nat: Nat.t;
 * }
 *)
-let substitute t name old_ip new_ip =
+let substitute t _name old_ip new_ip =
   Log.info (fun m -> m "Policy.substititue %a for %a" pp_ip old_ip pp_ip new_ip)
   >>= fun () ->
   ( if PrivilegedSet.mem (SrcIP old_ip) t.privileged then
     PrivilegedSet.remove (SrcIP old_ip) t.privileged
     |> PrivilegedSet.add (SrcIP new_ip)
-    |> fun npriv -> t.privileged <- t.privileged ) ;
+    |> fun _npriv -> t.privileged <- t.privileged ) ;
   let ntransp =
     IpPairSet.fold
-      (fun (_src_ip, _dst_ip) n ->
-        ( if 0 = Ipaddr.V4.compare _src_ip old_ip then (new_ip, _dst_ip)
-        else if 0 = Ipaddr.V4.compare _dst_ip old_ip then (_src_ip, new_ip)
-        else (_src_ip, _dst_ip) )
+      (fun (src_ip, dst_ip) n ->
+        ( if 0 = Ipaddr.V4.compare src_ip old_ip then (new_ip, dst_ip)
+        else if 0 = Ipaddr.V4.compare dst_ip old_ip then (src_ip, new_ip)
+        else (src_ip, dst_ip) )
         |> fun np -> IpPairSet.add np n)
       t.transport IpPairSet.empty
   in
@@ -318,9 +318,9 @@ let substitute t name old_ip new_ip =
         if 0 = Ipaddr.V4.compare src_ip new_ip then n
         else
           List.map
-            (fun (_name, _dst_ip) ->
-              if 0 = Ipaddr.V4.compare _dst_ip old_ip then (_name, new_ip)
-              else (_name, _dst_ip))
+            (fun (name, dst_ip) ->
+              if 0 = Ipaddr.V4.compare dst_ip old_ip then (name, new_ip)
+              else (name, dst_ip))
             resolvs
           |> fun nresolvs ->
           if 0 = Ipaddr.V4.compare src_ip old_ip then
