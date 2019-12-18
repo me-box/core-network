@@ -11,7 +11,7 @@ let existed_intf () =
   Lwt_stream.to_list st
   >>= fun lines ->
   let regex = "inet (([0-9]+.){3}[0-9]+/[0-9]+) .* ([a-zA-Z0-9_]+)$" in
-  let re = Re_posix.(regex |> re |> compile) in
+  let re = Re.Posix.(regex |> re |> compile) in
   List.fold_left
     (fun acc line ->
       try

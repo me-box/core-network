@@ -6,7 +6,7 @@ let cm_key () =
   if !cm_key <> "" then Rresult.R.ok !cm_key
   else
     let key_file = Fpath.add_seg secrets_dir "DATABOX_NETWORK_KEY" in
-    let get_key file = B64.encode (String.trim file) in
+    let get_key file = Base64.encode (String.trim file) in
     Rresult.R.map get_key (Bos.OS.File.read key_file)
     |> function
     | Ok key ->

@@ -27,8 +27,8 @@ module Make (Backend : Vnetif.BACKEND) = struct
   type callback =
        conn
     -> Cohttp.Request.t
-    -> Cohttp_lwt_body.t
-    -> (Cohttp.Response.t * Cohttp_lwt_body.t) Lwt.t
+    -> Cohttp_lwt.Body.t
+    -> (Cohttp.Response.t * Cohttp_lwt.Body.t) Lwt.t
 
   type t = {net: Vnet.t; start_fn: Conduit_mirage.server -> Http.t -> unit Lwt.t}
 
@@ -76,7 +76,7 @@ module Make (Backend : Vnetif.BACKEND) = struct
   let respond' ?headers ?code s = s |> respond ?headers ?code |> Lwt.return
 
   let json_of_body_exn req =
-    req |> Request.body |> Cohttp_lwt_body.to_string >|= Ezjsonm.from_string
+    req |> Request.body |> Cohttp_lwt.Body.to_string >|= Ezjsonm.from_string
 
   let auth_middleware =
     let name = "check auth for CM" in

@@ -17,12 +17,12 @@ let arp_query_pkt src_mac src_ip ip =
   in
   let arp_buf = Arpv4_packet.Marshal.make_cstruct arp_t in
   let eth_t =
-    Ethif_packet.
+    Ethernet_packet.
       { source= src_mac
       ; destination= Macaddr.broadcast
-      ; ethertype= Ethif_wire.ARP }
+      ; ethertype= Ethernet_wire.ARP }
   in
-  let eth_buf = Ethif_packet.Marshal.make_cstruct eth_t in
+  let eth_buf = Ethernet_packet.Marshal.make_cstruct eth_t in
   Cstruct.concat [eth_buf; arp_buf]
 
 let send fd buf =
@@ -39,7 +39,7 @@ let create_recv_st fd =
 
 let assert_arp st expected =
   let to_arp_reply buf =
-    match Ethif_packet.Unmarshal.of_cstruct buf with
+    match Ethernet_packet.Unmarshal.of_cstruct buf with
     | Ok (_, eth_payload) -> (
       match Arpv4_packet.Unmarshal.of_cstruct eth_payload with
       | Ok arp_pkt as ok ->
@@ -72,7 +72,7 @@ let test_mac =
   for i = 0 to 5 do
     Bytes.set addr i (char_of_int i)
   done ;
-  Macaddr.of_bytes_exn addr
+  Macaddr.of_octets_exn addr
 
 let test_ip = Ipaddr.V4.of_string_exn "192.168.0.17"
 

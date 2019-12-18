@@ -10,7 +10,7 @@ let hexdump_buf_debug desp buf =
       Cstruct.hexdump_to_buffer b buf ;
       m "%s len:%d pkt:%s" desp (Cstruct.len buf) (Buffer.contents b))
 
-let pp_ip = Ipaddr.V4.pp_hum
+let pp_ip = Ipaddr.V4.pp
 
 module Local = struct
   module Backend = Basic_backend.Make
@@ -39,7 +39,7 @@ module Local = struct
     | None ->
         Log.err (fun m -> m "Local service not initialized!")
     | Some t -> (
-        let open Ethif_packet in
+        let open Ethernet_packet in
         let source = local_virtual_mac in
         let destination = Service.mac t.service in
         let hd = {source; destination; ethertype} in
@@ -63,7 +63,7 @@ module Local = struct
           match parse buf with
           | Ok (Ethernet {dst= dst_mac; payload= Ipv4 {dst= dst_ip}})
             when 0 = Macaddr.compare dst_mac local_virtual_mac ->
-              let pkt_raw = Cstruct.shift buf Ethif_wire.sizeof_ethernet in
+              let pkt_raw = Cstruct.shift buf Ethernet_wire.sizeof_ethernet in
               intf.Intf.send_push @@ Some pkt_raw ;
               Lwt.return_unit
           | Ok
@@ -76,7 +76,7 @@ module Local = struct
                 in
                 Marshal.make_cstruct t
               in
-              write_to_service Ethif_wire.ARP arp_resp
+              write_to_service Ethernet_wire.ARP arp_resp
           | Ok fr ->
               Log.warn (fun m ->
                   m "not ipv4 or arp request: %s, dropped" (fr_info fr))
@@ -268,7 +268,7 @@ module Dispatcher = struct
       let resp = Dns_service.to_dns_response pkt resp in
       Interfaces.to_push t.interfaces dst_ip (fst resp)
     else if Local.is_to_local dst_ip then
-      Local.write_to_service Ethif_wire.IPv4 buf
+      Local.write_to_service Ethernet_wire.IPv4 buf
     else if Policy.is_authorized_transport t.policy src_ip dst_ip then
       Nat.translate t.nat (src_ip, dst_ip) (buf, pkt)
       >>= fun (nat_src_ip, nat_dst_ip, nat_buf, nat_pkt) ->
@@ -300,7 +300,7 @@ let create ?fifo intf_st =
             (fun () ->
               Log.info (fun m ->
                   m "register intf %s %a %a" intf.Intf.dev pp_ip intf.Intf.ip
-                    Ipaddr.V4.Prefix.pp_hum intf.Intf.network)
+                    Ipaddr.V4.Prefix.pp intf.Intf.network)
               >>= fun () -> Lwt.join [intf_starter (); interfaces_starter ()])
             (fun exn ->
               Log.err (fun m ->
@@ -333,7 +333,7 @@ let create ?fifo intf_st =
           Intf.set_gateway intf gw ;
           Log.info (fun m ->
               m "set gateway for %s(%a) to %a" intf.Intf.dev
-                Ipaddr.V4.Prefix.pp_hum intf.Intf.network Ipaddr.V4.pp_hum gw)
+                Ipaddr.V4.Prefix.pp intf.Intf.network Ipaddr.V4.pp gw)
           >>= fun () ->
           register_and_start intf intf_starter >>= fun () -> junction_lp () )
         else register_and_start intf intf_starter >>= fun () -> junction_lp ()

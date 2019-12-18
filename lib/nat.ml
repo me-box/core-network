@@ -11,7 +11,7 @@ type t =
   { mutable translation: pair IpPairMap.t
   ; mutable rule_handles: pair list IpMap.t }
 
-let pp_ip = Ipaddr.V4.pp_hum
+let pp_ip = Ipaddr.V4.pp
 
 let get_rule_handles t ip =
   if IpMap.mem ip t.rule_handles then Lwt.return @@ IpMap.find ip t.rule_handles

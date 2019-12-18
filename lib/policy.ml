@@ -10,7 +10,7 @@ module DomainPairSet = Set.Make (struct
 
   let compare (xx, xy) (yx, yy) =
     if (xx = yx && xy = yy) || (xx = yy && xy = yx) then 0
-    else Pervasives.compare (xx, xy) (yx, yy)
+    else Stdlib.compare (xx, xy) (yx, yy)
 end)
 
 type privileged =
@@ -26,7 +26,7 @@ module PrivilegedSet = Set.Make (struct
     | SrcIP a, SrcIP b ->
         Ipaddr.V4.compare a b
     | DstHost a, DstHost b ->
-        Pervasives.compare a b
+        Stdlib.compare a b
     | Network a, Network b ->
         Ipaddr.V4.Prefix.compare a b
     | _, _ ->
@@ -41,7 +41,7 @@ type t =
   ; interfaces: Interfaces.t
   ; nat: Nat.t }
 
-let pp_ip = Ipaddr.V4.pp_hum
+let pp_ip = Ipaddr.V4.pp
 
 let str_ip = Ipaddr.V4.to_string
 
@@ -199,12 +199,12 @@ let allow_privileged_host t name =
 let allow_privileged_network t net =
   t.privileged <- PrivilegedSet.add (Network net) t.privileged ;
   Log.info (fun m ->
-      m "allow privileged network: %a" Ipaddr.V4.Prefix.pp_hum net)
+      m "allow privileged network: %a" Ipaddr.V4.Prefix.pp net)
 
 let disallow_privileged_network t net =
   t.privileged <- PrivilegedSet.remove (Network net) t.privileged ;
   Log.info (fun m ->
-      m "disallow privileged network: %a" Ipaddr.V4.Prefix.pp_hum net)
+      m "disallow privileged network: %a" Ipaddr.V4.Prefix.pp net)
 
 let is_authorized_transport {transport; _} ipx ipy =
   IpPairSet.mem (ipx, ipy) transport
@@ -254,9 +254,9 @@ let is_from_privileged_net t ip =
     t.privileged
 
 let is_reverse_lookup name =
-  let regexp = Re_str.regexp ".in-addr.arpa" in
+  let regexp = Re.Str.regexp ".in-addr.arpa" in
   try
-    let _ = Re_str.search_forward regexp name 0 in
+    let _ = Re.Str.search_forward regexp name 0 in
     true
   with Not_found -> false
 

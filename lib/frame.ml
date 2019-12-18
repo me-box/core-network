@@ -101,7 +101,7 @@ let parse_arp_pkt inner =
   >>= fun () ->
   let get_ha buf offset =
     let raw = Cstruct.sub buf offset 6 in
-    Macaddr.of_bytes_exn @@ Cstruct.to_string raw
+    Macaddr.of_octets_exn @@ Cstruct.to_string raw
   in
   let code = Cstruct.BE.get_uint16 inner 6 in
   let sha = get_ha inner (6 + 2) in
@@ -119,10 +119,10 @@ let parse buf =
     >>= fun () ->
     let ethertype = Cstruct.BE.get_uint16 buf 12 in
     let dst_option =
-      Cstruct.sub buf 0 6 |> Cstruct.to_string |> Macaddr.of_bytes
+      Cstruct.sub buf 0 6 |> Cstruct.to_string |> Macaddr.of_octets
     in
     let src_option =
-      Cstruct.sub buf 6 6 |> Cstruct.to_string |> Macaddr.of_bytes
+      Cstruct.sub buf 6 6 |> Cstruct.to_string |> Macaddr.of_octets
     in
     match (dst_option, src_option) with
     | None, _ ->

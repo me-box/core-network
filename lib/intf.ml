@@ -10,7 +10,7 @@ module Pkt = struct
   let dst_of_ipv4 buf = Ipv4_wire.get_ipv4_dst buf |> Ipaddr.V4.of_int32
 
   let eth_hd source destination ethertype =
-    Ethif_packet.(Marshal.make_cstruct {source; destination; ethertype})
+    Ethernet_packet.(Marshal.make_cstruct {source; destination; ethertype})
 end
 
 type t =
@@ -50,11 +50,11 @@ let rec write_intf t eth arp send_st =
       if (not (Ipaddr.V4.Prefix.mem dst t.network)) && t.gateway = None then
         Log.err (fun m ->
             m "%s(%a without gateway) nowhere to send pkt with dst:%a" t.dev
-              Ipaddr.V4.Prefix.pp_hum t.network Ipaddr.V4.pp_hum dst)
+              Ipaddr.V4.Prefix.pp t.network Ipaddr.V4.pp dst)
         >>= fun () -> write_intf t eth arp send_st
       else if dst = Ipaddr.V4.Prefix.broadcast t.network then
         let dst_mac = Macaddr.broadcast in
-        let hd = Pkt.eth_hd src_mac dst_mac Ethif_wire.IPv4 in
+        let hd = Pkt.eth_hd src_mac dst_mac Ethernet_wire.IPv4 in
         Ethif.writev eth [hd; ipv4_pkt]
         >>= (function
               | Ok () ->
@@ -71,7 +71,7 @@ let rec write_intf t eth arp send_st =
         Arpv4.query arp query_ip
         >>= (function
               | Ok dst_mac -> (
-                  let hd = Pkt.eth_hd src_mac dst_mac Ethif_wire.IPv4 in
+                  let hd = Pkt.eth_hd src_mac dst_mac Ethernet_wire.IPv4 in
                   Ethif.writev eth [hd; ipv4_pkt]
                   >>= function
                   | Ok () ->

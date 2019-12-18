@@ -7,8 +7,8 @@ module Make (B : Vnetif.BACKEND) : sig
   type callback =
        conn
     -> Cohttp.Request.t
-    -> Cohttp_lwt_body.t
-    -> (Cohttp.Response.t * Cohttp_lwt_body.t) Lwt.t
+    -> Cohttp_lwt.Body.t
+    -> (Cohttp.Response.t * Cohttp_lwt.Body.t) Lwt.t
 
   type t
 

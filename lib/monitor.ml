@@ -11,7 +11,7 @@ let intf_event l =
   let regex = Printf.sprintf "(%s)|(%s)" up down in
   try
     let groups =
-      let re = Re_posix.(regex |> re |> compile) in
+      let re = Re.Posix.(regex |> re |> compile) in
       exec re l |> Group.all
     in
     if groups.(2) <> "" && groups.(3) <> "" then
@@ -39,7 +39,7 @@ let existed_intf interfaces push_intf =
   Lwt_stream.to_list st
   >>= fun lines ->
   let regex = "inet (([0-9]+.){3}[0-9]+/[0-9]+) .*(eth[0-9]+)$" in
-  let re = Re_posix.(regex |> re |> compile) in
+  let re = Re.Posix.(regex |> re |> compile) in
   List.fold_left
     (fun acc line ->
       try

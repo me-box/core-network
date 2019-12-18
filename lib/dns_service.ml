@@ -4,7 +4,7 @@ let dns = Logs.Src.create "dns" ~doc:"Dns service"
 
 module Log = (val Logs_lwt.src_log dns : Logs_lwt.LOG)
 
-let pp_ip = Ipaddr.V4.pp_hum
+let pp_ip = Ipaddr.V4.pp
 
 let is_dns_query =
   let open Frame in

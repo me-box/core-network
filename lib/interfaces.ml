@@ -9,7 +9,7 @@ module Log = (val Logs_lwt.src_log interfaces : Logs_lwt.LOG)
 module IntfSet = Set.Make (struct
   type t = Intf.t
 
-  let compare x y = Pervasives.compare x.dev y.dev
+  let compare x y = Stdlib.compare x.dev y.dev
 end)
 
 module Pkt = struct
@@ -49,7 +49,7 @@ type t =
   ; mutable interfaces: IntfSet.t
   ; mutable intf_cache: Intf.t IpMap.t }
 
-let pp_ip = Ipaddr.V4.pp_hum
+let pp_ip = Ipaddr.V4.pp
 
 let intf_of_ip t ip =
   if IpMap.mem ip t.intf_cache then Lwt.return_ok @@ IpMap.find ip t.intf_cache
@@ -112,7 +112,7 @@ let acquire_fake_dst t src_ip =
   >>= fun fake_ip ->
   Log.info (fun m ->
       m "acquire fake ip %a from %s %a" pp_ip fake_ip intf.Intf.dev
-        Ipaddr.V4.Prefix.pp_hum intf.Intf.network)
+        Ipaddr.V4.Prefix.pp intf.Intf.network)
   >>= fun () -> Lwt.return fake_ip
 
 let release_fake_dst t fake_dst =
@@ -122,7 +122,7 @@ let release_fake_dst t fake_dst =
   >>= fun () ->
   Log.info (fun m ->
       m "release fake ip %a to %s %a" pp_ip fake_dst intf.Intf.dev
-        Ipaddr.V4.Prefix.pp_hum intf.Intf.network)
+        Ipaddr.V4.Prefix.pp intf.Intf.network)
 
 let register_intf t intf dispatch_fn =
   let rec drain_pkt () =
