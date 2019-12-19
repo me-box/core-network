@@ -147,7 +147,7 @@ let rec fr_info = function
             "reply"
         | `Unknown ->
             "unknown" )
-  | Ipv4 {src; dst; payload;_} ->
+  | Ipv4 {src; dst; payload; _} ->
       let payload_str = fr_info payload in
       Printf.sprintf "Ipv4 %s -> %s {%s}" (Ipaddr.V4.to_string src)
         (Ipaddr.V4.to_string dst) payload_str
