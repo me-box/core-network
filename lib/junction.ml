@@ -29,7 +29,7 @@ module Local = struct
     match !instance with
     | None ->
         false
-    | Some {address} ->
+    | Some {address; _} ->
         0 = Ipaddr.V4.compare ip address
 
   let local_virtual_mac = Macaddr.make_local (fun x -> x + 1)
@@ -45,13 +45,18 @@ module Local = struct
         let hd = {source; destination; ethertype} in
         let hd = Marshal.make_cstruct hd in
         let fr = Cstruct.append hd pkt in
-        Backend.write t.backend t.id fr
+        let len = Cstruct.len fr in
+        let payload dst =
+          Cstruct.blit fr 0 dst 0 len ;
+          len
+        in
+        Backend.write t.backend t.id payload ~size:len
         >>= function
         | Ok () ->
             Lwt.return_unit
         | Error err ->
             Log.err (fun m ->
-                m "write_to_service err: %a" Mirage_net.pp_error err)
+                m "write_to_service err: %a" Mirage_net.Net.pp_error err)
             >>= Lwt.return )
 
   (*from local stack in Server*)
@@ -61,22 +66,28 @@ module Local = struct
       Lwt.catch
         (fun () ->
           match parse buf with
-          | Ok (Ethernet {dst= dst_mac; payload= Ipv4 {dst= dst_ip}})
+          | Ok (Ethernet {dst= dst_mac; _})
+          (* May have issues here since not validating dst_ip *)
             when 0 = Macaddr.compare dst_mac local_virtual_mac ->
               let pkt_raw = Cstruct.shift buf Ethernet_wire.sizeof_ethernet in
               intf.Intf.send_push @@ Some pkt_raw ;
               Lwt.return_unit
           | Ok
               (Ethernet
-                {src= tha; payload= Arp {op= `Request; spa= tpa; tpa= spa}}) ->
+                {src= tha; payload= Arp {op= `Request; spa= tpa; tpa= spa; _}; _})
+            ->
               let arp_resp =
-                let open Arpv4_packet in
+                let open Arp_packet in
                 let t =
-                  {op= Arpv4_wire.Reply; sha= local_virtual_mac; spa; tha; tpa}
+                  { operation= Arp_packet.Reply
+                  ; source_mac= local_virtual_mac
+                  ; source_ip= spa
+                  ; target_mac= tha
+                  ; target_ip= tpa }
                 in
-                Marshal.make_cstruct t
+                encode t
               in
-              write_to_service Ethernet_wire.ARP arp_resp
+              write_to_service Ethernet_wire.(`ARP) arp_resp
           | Ok fr ->
               Log.warn (fun m ->
                   m "not ipv4 or arp request: %s, dropped" (fr_info fr))
@@ -96,11 +107,11 @@ module Local = struct
     let backend = Backend.create ~yield ~use_async_readers () in
     let id =
       match Backend.register backend with
-      | `Ok id ->
+      | Ok id ->
           id
-      | `Error err ->
+      | Error err ->
           Log.err (fun m ->
-              m "Backend.register err: %a" Mirage_net.pp_error err)
+              m "Backend.register err: %a" Mirage_net.Net.pp_error err)
           |> Lwt.ignore_result ;
           -1
     in
@@ -227,7 +238,7 @@ module Local = struct
     post "/privileged" add_privileged_handler
 
   let get_status =
-    let status_handler req = respond' ~code:`OK (`String "active") in
+    let status_handler _req = respond' ~code:`OK (`String "active") in
     get "/status" status_handler
 
   let start_service t po =
@@ -249,7 +260,7 @@ module Dispatcher = struct
   type t = {interfaces: Interfaces.t; policy: Policy.t; nat: Nat.t}
 
   let dispatch t (buf, pkt) =
-    let src_ip, dst_ip, ihl =
+    let src_ip, dst_ip, _ihl =
       let open Frame in
       match pkt with
       | Ipv4 {src; dst; ihl; _} ->
@@ -268,10 +279,10 @@ module Dispatcher = struct
       let resp = Dns_service.to_dns_response pkt resp in
       Interfaces.to_push t.interfaces dst_ip (fst resp)
     else if Local.is_to_local dst_ip then
-      Local.write_to_service Ethernet_wire.IPv4 buf
+      Local.write_to_service Ethernet_wire.(`IPv4) buf
     else if Policy.is_authorized_transport t.policy src_ip dst_ip then
       Nat.translate t.nat (src_ip, dst_ip) (buf, pkt)
-      >>= fun (nat_src_ip, nat_dst_ip, nat_buf, nat_pkt) ->
+      >>= fun (nat_src_ip, nat_dst_ip, nat_buf, _nat_pkt) ->
       Log.debug (fun m ->
           m "Dispatcher: allowed pkt[NAT] %a -> %a => %a -> %a" pp_ip src_ip
             pp_ip dst_ip pp_ip nat_src_ip pp_ip nat_dst_ip)
