@@ -30,7 +30,9 @@ module Pkt = struct
           ; dst
           ; ttl= 38
           ; proto= Marshal.protocol_to_int `ICMP
-          ; options= Cstruct.create 0 }
+          ; options= Cstruct.create 0
+          ; id
+          ; off= 0 }
       in
       let payload_len = Cstruct.len icmp in
       let result = Ipv4_packet.Marshal.into_cstruct ~payload_len ip_t buf in
