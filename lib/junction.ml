@@ -332,8 +332,8 @@ let create ?fifo intf_st =
           in
           Intf.set_gateway intf gw ;
           Log.info (fun m ->
-              m "set gateway for %s(%a) to %a" intf.Intf.dev
-                Ipaddr.V4.Prefix.pp intf.Intf.network Ipaddr.V4.pp gw)
+              m "set gateway for %s(%a) to %a" intf.Intf.dev Ipaddr.V4.Prefix.pp
+                intf.Intf.network Ipaddr.V4.pp gw)
           >>= fun () ->
           register_and_start intf intf_starter >>= fun () -> junction_lp () )
         else register_and_start intf intf_starter >>= fun () -> junction_lp ()
