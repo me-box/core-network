@@ -9,7 +9,7 @@ module Log = (val Logs_lwt.src_log intf : Logs_lwt.LOG)
 module Pkt = struct
   let dst_of_ipv4 buf = Ipv4_wire.get_ipv4_dst buf |> Ipaddr.V4.of_int32
 
-  let eth_hd source destination ethertype =
+  let _eth_hd source destination ethertype =
     Ethernet_packet.(Marshal.make_cstruct {source; destination; ethertype})
 end
 
@@ -32,7 +32,7 @@ let read_intf dev net eth arp recv_push =
   let ipv4 buf = recv_push @@ Some buf ; Lwt.return_unit in
   let arpv4 = Arpv4.input arp in
   let listen_fn = Ethif.input ~arpv4 ~ipv4 ~ipv6 eth in
-  Netif.listen net listen_fn ~header_size
+  Netif.listen net listen_fn ~header_size:Ethernet_wire.sizeof_ethernet
   >>= function
   | Ok () ->
       Log.info (fun m -> m "%s disconnected!" dev)
