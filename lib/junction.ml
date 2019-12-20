@@ -87,7 +87,7 @@ module Local = struct
                 in
                 encode t
               in
-              write_to_service Ethernet_wire.(`ARP) arp_resp
+              write_to_service `ARP arp_resp
           | Ok fr ->
               Log.warn (fun m ->
                   m "not ipv4 or arp request: %s, dropped" (fr_info fr))
@@ -139,14 +139,14 @@ module Local = struct
             let peers = List.assoc "peers" dict |> get_list get_string in
             Lwt_list.map_p (fun peer -> Policy.connect po name peer) peers
             >>= fun _ ->
-            let status = Cohttp.Code.(`OK) in
+            let status = `OK in
             Lwt.return (status, `Json (`O []))
           with e -> Lwt.fail e)
         (fun e ->
           let msg =
             Printf.sprintf "/connect server err: %s" (Printexc.to_string e)
           in
-          let status = Cohttp.Code.(`Code 500) in
+          let status = `Code 500 in
           Lwt.return (status, `String msg))
       >>= fun (code, body) -> respond' ~code body
     in
@@ -168,14 +168,14 @@ module Local = struct
             in
             Policy.disconnect po name ip
             >>= fun () ->
-            let status = Cohttp.Code.(`OK) in
+            let status = `OK in
             Lwt.return (status, `Json (`O []))
           with e -> Lwt.fail e)
         (fun e ->
           let msg =
             Printf.sprintf "/disconnect server err: %s" (Printexc.to_string e)
           in
-          let status = Cohttp.Code.(`Code 500) in
+          let status = `Code 500 in
           Lwt.return (status, `String msg))
       >>= fun (code, body) -> respond' ~code body
     in
@@ -199,14 +199,14 @@ module Local = struct
             in
             Policy.substitute po name old_ip new_ip
             >>= fun () ->
-            let status = Cohttp.Code.(`OK) in
+            let status = `OK in
             Lwt.return (status, `Json (`O []))
           with e -> Lwt.fail e)
         (fun e ->
           let msg =
             Printf.sprintf "/restart server err: %s" (Printexc.to_string e)
           in
-          let status = Cohttp.Code.(`Code 500) in
+          let status = `Code 500 in
           Lwt.return (status, `String msg))
       >>= fun (code, body) -> respond' ~code body
     in
@@ -278,8 +278,7 @@ module Dispatcher = struct
       >>= fun resp ->
       let resp = Dns_service.to_dns_response pkt resp in
       Interfaces.to_push t.interfaces dst_ip (fst resp)
-    else if Local.is_to_local dst_ip then
-      Local.write_to_service Ethernet_wire.(`IPv4) buf
+    else if Local.is_to_local dst_ip then Local.write_to_service `IPv4 buf
     else if Policy.is_authorized_transport t.policy src_ip dst_ip then
       Nat.translate t.nat (src_ip, dst_ip) (buf, pkt)
       >>= fun (nat_src_ip, nat_dst_ip, nat_buf, _nat_pkt) ->
