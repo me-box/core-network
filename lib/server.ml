@@ -1,5 +1,4 @@
 open Lwt.Infix
-open Mirage_types_lwt
 
 let service = Logs.Src.create "service" ~doc:"REST service of Bridge"
 
@@ -7,14 +6,15 @@ module Log = (val Logs_lwt.src_log service : Logs_lwt.LOG)
 
 module Make (Backend : Vnetif.BACKEND) = struct
   module Vnet = Vnetif.Make (Backend)
-  module E = Ethif.Make (Vnet)
-  module A = Arpv4.Make (E) (Mclock) (OS.Time)
-  module I = Static_ipv4.Make (E) (A)
+  module E = Ethernet.Make (Vnet)
+  module A = Arp.Make (E) (OS.Time)
+  module I = Static_ipv4.Make (Mirage_random_stdlib) (Mclock) (E) (A)
   module Icmp = Icmpv4.Make (I)
-  module U = Udp.Make (I) (Stdlibrandom)
-  module T = Tcp.Flow.Make (I) (OS.Time) (Mclock) (Stdlibrandom)
+  module U = Udp.Make (I) (Mirage_random_stdlib)
+  module T = Tcp.Flow.Make (I) (OS.Time) (Mclock) (Mirage_random_stdlib)
   module Tcpip =
-    Tcpip_stack_direct.Make (OS.Time) (Stdlibrandom) (Vnet) (E) (A) (I) (Icmp)
+    Tcpip_stack_direct.Make (OS.Time) (Mirage_random_stdlib) (Vnet) (E) (A) (I)
+      (Icmp)
       (U)
       (T)
   module C = Conduit_mirage.With_tcp (Tcpip)
@@ -43,7 +43,7 @@ module Make (Backend : Vnetif.BACKEND) = struct
     let uri = Cohttp.Request.uri req in
     Http.respond_not_found ~uri ()
 
-  let mac {net} = Vnet.mac net
+  let mac {net; _} = Vnet.mac net
 
   let get route action = (`GET, Opium_kernel.Route.of_string route, action)
 
@@ -126,11 +126,9 @@ module Make (Backend : Vnetif.BACKEND) = struct
           Log.err (fun m -> m "handler err: %s" (Printexc.to_string e))
           >>= fun () ->
           let body = Printexc.to_string e in
-          let resp =
-            Response.of_string_body ~code:Cohttp.Code.(`Code 500) body
-          in
+          let resp = Response.of_string_body ~code:(`Code 500) body in
           Lwt.return resp)
-      >>= fun {Response.code; headers; body} ->
+      >>= fun {Response.code; headers; body; _} ->
       Http.respond ~headers ~body ~status:code ()
 
   let make b ip =
@@ -140,11 +138,11 @@ module Make (Backend : Vnetif.BACKEND) = struct
     >>= fun ethif ->
     Mclock.connect ()
     >>= fun clock ->
-    or_fail "A.connect" @@ A.connect ethif clock
+    or_fail "A.connect" @@ A.connect ethif
     >>= fun arp ->
-    or_fail "I.connect" @@ I.connect ~ip ethif arp
+    or_fail "I.connect" @@ I.connect ~ip () ethif arp
     >>= fun i ->
-    Lwt.return @@ Stdlibrandom.initialize ()
+    or_fail "Random.initialise" @@ Mirage_random_stdlib.initialize ()
     >>= fun () ->
     or_fail "Icmp.connect" @@ Icmp.connect i
     >>= fun icmp ->
@@ -152,8 +150,7 @@ module Make (Backend : Vnetif.BACKEND) = struct
     >>= fun u ->
     or_fail "T.connect" @@ T.connect i clock
     >>= fun t ->
-    let config = Mirage_stack_lwt.{name= "REST bridge"; interface= net} in
-    or_fail "Tcpip.connect" @@ Tcpip.connect config ethif arp i icmp u t
+    or_fail "Tcpip.connect" @@ Tcpip.connect net ethif arp i icmp u t
     >>= fun tcpip ->
     Nocrypto_entropy_lwt.initialize ()
     >>= fun () ->
@@ -184,7 +181,7 @@ module Make (Backend : Vnetif.BACKEND) = struct
     | Error _ ->
         Lwt.return (`TCP port)
 
-  let start {start_fn} ?(port = 8080) ?(callback = default_not_found) () =
+  let start {start_fn; _} ?(port = 8080) ?(callback = default_not_found) () =
     server port
     >>= fun server ->
     let t = Http.make ~callback () in
