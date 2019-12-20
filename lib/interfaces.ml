@@ -31,7 +31,7 @@ module Pkt = struct
           ; ttl= 38
           ; proto= Marshal.protocol_to_int `ICMP
           ; options= Cstruct.create 0
-          ; id
+          ; id= Random.int Int.max_int
           ; off= 0 }
       in
       let payload_len = Cstruct.len icmp in

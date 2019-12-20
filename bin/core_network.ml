@@ -15,6 +15,7 @@ let print_async_exn () =
   Lwt.async_exception_hook := hook'
 
 let main fifo logs =
+  let () = Random.self_init () in
   let open Lwt.Infix in
   Utils.Log.set_up_logs logs
   >>= fun () ->

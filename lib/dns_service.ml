@@ -78,7 +78,7 @@ let to_dns_response pkt resp =
           ; dst
           ; ttl= 38
           ; proto= Marshal.protocol_to_int `UDP
-          ; id
+          ; id= Random.int Int.max_int
           ; off= 0 }
       in
       let ip_hd_wire = Cstruct.create Ipv4_wire.sizeof_ipv4 in
