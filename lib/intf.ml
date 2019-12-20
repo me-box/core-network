@@ -1,6 +1,6 @@
 open Lwt.Infix
-module Ethif = Ethif.Make (Netif)
-module Arpv4 = Arpv4.Make (Ethif) (Mclock) (OS.Time)
+module Ethif = Ethernet.Make (Netif)
+module Arpv4 = Arp.Make (Ethif) (OS.Time)
 
 let intf = Logs.Src.create "intf" ~doc:"Network Interface"
 
@@ -32,7 +32,7 @@ let read_intf dev net eth arp recv_push =
   let ipv4 buf = recv_push @@ Some buf ; Lwt.return_unit in
   let arpv4 = Arpv4.input arp in
   let listen_fn = Ethif.input ~arpv4 ~ipv4 ~ipv6 eth in
-  Netif.listen net listen_fn
+  Netif.listen net listen_fn ~header_size
   >>= function
   | Ok () ->
       Log.info (fun m -> m "%s disconnected!" dev)
@@ -45,6 +45,11 @@ let rec write_intf t eth arp send_st =
   Lwt_stream.get send_st
   >>= function
   | Some ipv4_pkt ->
+      let payload buf =
+        let len = Cstruct.len ipv4_pkt in
+        Cstruct.blit ipv4_pkt 0 buf 0 len ;
+        len
+      in
       let src_mac = Ethif.mac eth in
       let dst = Pkt.dst_of_ipv4 ipv4_pkt in
       if (not (Ipaddr.V4.Prefix.mem dst t.network)) && t.gateway = None then
@@ -53,9 +58,8 @@ let rec write_intf t eth arp send_st =
               Ipaddr.V4.Prefix.pp t.network Ipaddr.V4.pp dst)
         >>= fun () -> write_intf t eth arp send_st
       else if dst = Ipaddr.V4.Prefix.broadcast t.network then
-        let dst_mac = Macaddr.broadcast in
-        let hd = Pkt.eth_hd src_mac dst_mac Ethernet_wire.IPv4 in
-        Ethif.writev eth [hd; ipv4_pkt]
+        let dst = Macaddr.broadcast in
+        Ethif.write eth ~src:src_mac dst `IPv4 payload
         >>= (function
               | Ok () ->
                   Lwt.return_unit
@@ -71,8 +75,7 @@ let rec write_intf t eth arp send_st =
         Arpv4.query arp query_ip
         >>= (function
               | Ok dst_mac -> (
-                  let hd = Pkt.eth_hd src_mac dst_mac Ethernet_wire.IPv4 in
-                  Ethif.writev eth [hd; ipv4_pkt]
+                  Ethif.write eth ~src:src_mac dst_mac `IPv4 payload
                   >>= function
                   | Ok () ->
                       Lwt.return_unit
@@ -99,18 +102,15 @@ let start_intf t net eth arp recv_push send_st () =
 let init_stack dev ip =
   Netif.connect dev
   >>= fun net ->
-  Mclock.connect ()
-  >>= fun mclock ->
-  let mtu = Netif.mtu net in
-  Ethif.connect ~mtu net
+  Ethif.connect net
   >>= fun ethif ->
-  Arpv4.connect ethif mclock
+  Arpv4.connect ethif
   >>= fun arp ->
   Arpv4.set_ips arp [ip] >>= fun () -> Lwt.return (net, ethif, arp)
 
 let lt_remove e = List.filter (fun e' -> e' <> e)
 
-let fake_ip_op arp ip network =
+let fake_ip_op arp _ip network =
   let netmask = Ipaddr.V4.Prefix.bits network in
   let last_added =
     let network = Ipaddr.V4.Prefix.network network in
