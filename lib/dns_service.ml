@@ -25,8 +25,8 @@ let is_dns_response =
 let query_of_pkt =
   let open Frame in
   function
-  | Ipv4 {payload= Udp {dst= 53; payload= Payload buf}}
-  | Ipv4 {payload= Tcp {dst= 53; payload= Payload buf}} ->
+  | Ipv4 {payload= Udp {dst= 53; payload= Payload buf; _}; _}
+  | Ipv4 {payload= Tcp {dst= 53; payload= Payload buf; _}; _} ->
       let open Dns.Packet in
       Lwt.catch
         (fun () -> Lwt.return @@ parse buf)
@@ -77,11 +77,13 @@ let to_dns_response pkt resp =
           ; src
           ; dst
           ; ttl= 38
-          ; proto= Marshal.protocol_to_int `UDP }
+          ; proto= Marshal.protocol_to_int `UDP
+          ; id
+          ; off= 0 }
       in
       let ip_hd_wire = Cstruct.create Ipv4_wire.sizeof_ipv4 in
       match Ipv4_packet.Marshal.into_cstruct ~payload_len ip_hd ip_hd_wire with
-      | Error e ->
+      | Error _e ->
           raise @@ Failure "to_response_pkt -> into_cstruct"
       | Ok () ->
           Ipv4_wire.set_ipv4_id ip_hd_wire (Random.int 65535) ;
