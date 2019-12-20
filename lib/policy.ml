@@ -198,8 +198,7 @@ let allow_privileged_host t name =
 
 let allow_privileged_network t net =
   t.privileged <- PrivilegedSet.add (Network net) t.privileged ;
-  Log.info (fun m ->
-      m "allow privileged network: %a" Ipaddr.V4.Prefix.pp net)
+  Log.info (fun m -> m "allow privileged network: %a" Ipaddr.V4.Prefix.pp net)
 
 let disallow_privileged_network t net =
   t.privileged <- PrivilegedSet.remove (Network net) t.privileged ;
