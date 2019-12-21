@@ -1,18 +1,17 @@
 #FROM databoxsystems/base-image-ocaml:alpine-3.4_ocaml-4.04.2 as BUILDER
-FROM ocaml/opam2:alpine-3.7-ocaml-4.04 as BUILDER
+FROM ocaml/opam2:alpine as BUILDER
 
 ENV OCAMLYES=true
 
 WORKDIR /core-network
 ADD core-network.export core-network.export
 
-RUN sudo apk update && sudo apk add alpine-sdk bash gmp-dev perl autoconf linux-headers &&\
-    #opam remote add git https://github.com/ocaml/opam-repository.git &&\
-    opam pin add -n mirage-net-psock.0.1.0 https://github.com/sevenEng/mirage-net-psock.git#921900d502504ac46ef63b52935e4398d24647f4 &&\
+RUN sudo apk update && sudo apk add alpine-sdk bash gmp-dev perl autoconf linux-headers zeromq-dev &&\
+    opam switch 4.08 && opam update && \
+    opam pin add -n mirage-net-psock.0.1.0 https://github.com/sevenEng/mirage-net-psock.git#921900d502504ac46ef63b52935e4398d24647f4 && \
     opam switch import core-network.export
 
 ADD . .
-RUN opam remove jbuilder && opam install dune lwt cstruct dns ipaddr mirage-conduit mirage-http mirage-logs mirage-net-psock mirage-unix mirage-vnetif nocrypto opium_kernel tcpip tls
 RUN sudo chown opam: -R . && opam config exec -- dune build bin/core_network.exe
 
 
