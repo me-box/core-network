@@ -23,7 +23,6 @@ roots: [
   "ipaddr.4.0.0"
   "logs.0.7.0"
   "lwt.4.4.0"
-  "merlin.3.3.2"
   "mirage-clock-freestanding.2.0.0"
   "mirage-clock-unix.2.0.0"
   "mirage-logs.1.1.0"
@@ -44,7 +43,6 @@ roots: [
   "tcpip.3.7.9"
   "utop.2.4.2"
   "zmq.5.1.2"
-  "zmq-async.5.1.2"
   "zmq-lwt.5.1.2"
 ]
 installed: [
@@ -124,7 +122,6 @@ installed: [
   "macaddr.4.0.0"
   "macaddr-cstruct.4.0.0"
   "magic-mime.1.1.2"
-  "merlin.3.3.2"
   "mirage-block.1.2.0"
   "mirage-block-lwt.1.2.0"
   "mirage-channel.3.2.0"
@@ -257,86 +254,9 @@ installed: [
   "zarith.1.9.1"
   "zed.2.0.3"
   "zmq.5.1.2"
-  "zmq-async.5.1.2"
   "zmq-lwt.5.1.2"
 ]
-pinned: [
-  "dns-forward.0.10.0"
-  "dns-forward-lwt-unix.0.9.0"
-  "mirage-net-psock.~dev"
-  "zmq.5.1.2"
-  "zmq-async.5.1.2"
-  "zmq-lwt.5.1.2"
-]
-package "dns-forward" {
-  opam-version: "2.0"
-  version: "0.10.0"
-  maintainer: "dave@recoil.org"
-  authors: "David Scott"
-  license: "ISC"
-  homepage: "https://github.com/mirage/ocaml-dns-forward"
-  doc: "https://mirage.github.io/ocaml-dns-forward/"
-  bug-reports: "https://github.com/mirage/ocaml-dns-forward/issues"
-  depends: [
-    "ocaml" {>= "4.03.0"}
-    "jbuilder" {build & >= "1.0+beta10"}
-    "ppx_sexp_conv" {build}
-    "cstruct" {>= "3.0.0"}
-    "logs" {>= "0.5.0"}
-    "lwt" {>= "2.7.0"}
-    "mirage-flow-lwt" {>= "1.2.0"}
-    "mirage-clock-lwt"
-    "mirage-channel-lwt"
-    "mirage-time-lwt"
-    "duration"
-    "dns"
-    "rresult"
-    "astring"
-    "fmt"
-    "result"
-    "mtime"
-    "sexplib"
-    "ipaddr"
-  ]
-  build: [
-    ["jbuilder" "subst"] {pinned}
-    ["jbuilder" "build" "-p" name "-j" jobs]
-    ["jbuilder" "runtest" "-p" name] {with-test}
-  ]
-  dev-repo: "git+https://github.com/mirage/ocaml-dns-forward.git"
-  url {
-    src: "git+https://github.com/mirage/ocaml-dns-forward.git"
-  }
-}
-package "dns-forward-lwt-unix" {
-  opam-version: "2.0"
-  version: "0.9.0"
-  maintainer: "dave@recoil.org"
-  authors: "David Scott"
-  license: "ISC"
-  homepage: "https://github.com/mirage/ocaml-dns-forward"
-  doc: "https://mirage.github.io/ocaml-dns-forward/"
-  bug-reports: "https://github.com/mirage/ocaml-dns-forward/issues"
-  depends: [
-    "ocaml" {>= "4.03.0"}
-    "jbuilder" {build & >= "1.0+beta10"}
-    "dns-forward" {>= "0.8.5"}
-    "lwt" {>= "2.7.0"}
-    "cstruct-lwt" {>= "3.0.0"}
-    "io-page-unix" {>= "2.0.0"}
-    "mirage-clock-unix"
-    "alcotest" {with-test}
-  ]
-  build: [
-    ["jbuilder" "subst"] {pinned}
-    ["jbuilder" "build" "-p" name "-j" jobs]
-    ["jbuilder" "runtest" "-p" name] {with-test}
-  ]
-  dev-repo: "git+https://github.com/mirage/ocaml-dns-forward.git"
-  url {
-    src: "git+https://github.com/mirage/ocaml-dns-forward.git"
-  }
-}
+pinned: "mirage-net-psock.~dev"
 package "mirage-net-psock" {
   opam-version: "2.0"
   version: "~dev"
@@ -364,94 +284,5 @@ package "mirage-net-psock" {
   dev-repo: "git+https://github.com/me-box/mirage-net-psock.git"
   url {
     src: "git+https://github.com/me-box/mirage-net-psock.git"
-  }
-}
-package "zmq" {
-  opam-version: "2.0"
-  version: "5.1.2"
-  synopsis: "OCaml bindings for ZeroMQ 4.x"
-  description: """
-This library contains basic bindings for zmq.
-Lwt aware bindings to zmq are availble though package zmq-lwt
-Async aware bindings to zmq are availble though package zmq-async
-
-Api documentation can be found at https://issuu.github.io/ocaml-zmq"""
-  maintainer: "anders@fugmann.net"
-  authors: ["Anders Fugmann" "Pedro Borges" "Peter Zotov"]
-  license: "MIT"
-  homepage: "https://github.com/issuu/ocaml-zmq"
-  doc: "https://issuu.github.io/ocaml-zmq/"
-  bug-reports: "https://github.com/issuu/ocaml-zmq/issues"
-  depends: [
-    "ocaml" {>= "4.03.0"}
-    "conf-zmq"
-    "dune"
-    "ounit2" {with-test}
-    "base-unix"
-    "stdint" {>= "0.4.2"}
-    "dune-configurator"
-  ]
-  conflicts: ["ocaml-zmq"]
-  build: [
-    ["dune" "build" "-p" name "-j" jobs]
-    ["dune" "runtest" "-p" name "-j" jobs] {with-test}
-  ]
-  dev-repo: "git+https://github.com/issuu/ocaml-zmq.git"
-  url {
-    src: "git+file:///home/cjen1/Documents/tmp/repos/ocaml-zmq#master"
-  }
-}
-package "zmq-async" {
-  opam-version: "2.0"
-  version: "5.1.2"
-  synopsis: "Async aware bindings to zmq"
-  maintainer: "anders@fugmann.net"
-  authors: "Rudi Grinberg"
-  license: "MIT"
-  homepage: "https://github.com/issuu/ocaml-zmq"
-  doc: "https://issuu.github.io/ocaml-zmq/"
-  bug-reports: "https://github.com/issuu/ocaml-zmq/issues"
-  depends: [
-    "ocaml" {>= "4.04.1"}
-    "zmq" {= version}
-    "dune"
-    "async_unix" {>= "v0.11.0" & < "v0.14"}
-    "async_kernel" {>= "v0.11.0" & < "v0.14"}
-    "base" {>= "v0.11.0" & < "v0.14"}
-    "ounit2" {with-test}
-  ]
-  build: [
-    ["dune" "build" "-p" name "-j" jobs]
-    ["dune" "runtest" "-p" name "-j" jobs] {with-test}
-  ]
-  dev-repo: "git+https://github.com/issuu/ocaml-zmq.git"
-  url {
-    src: "git+file:///home/cjen1/Documents/tmp/repos/ocaml-zmq#master"
-  }
-}
-package "zmq-lwt" {
-  opam-version: "2.0"
-  version: "5.1.2"
-  synopsis: "Lwt aware bindings to zmq"
-  maintainer: "Anders Fugmann <anders@fugmann.net>"
-  authors: "Anders Fugmann <anders@fugmann.net>"
-  license: "MIT"
-  homepage: "https://github.com/issuu/ocaml-zmq"
-  doc: "https://issuu.github.io/ocaml-zmq/"
-  bug-reports: "https://github.com/issuu/ocaml-zmq/issues"
-  depends: [
-    "ocaml" {>= "4.03.0"}
-    "zmq" {= version}
-    "ounit2" {with-test}
-    "dune"
-    "lwt"
-  ]
-  build: [
-    ["dune" "build" "-p" name "-j" jobs]
-    ["dune" "runtest" "-p" name "-j" jobs] {with-test}
-  ]
-  dev-repo: "git+https://github.com/issuu/ocaml-zmq.git"
-  url {
-    src: "git+file:///home/cjen1/Documents/tmp/repos/ocaml-zmq#master"
   }
 }
