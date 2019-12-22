@@ -266,7 +266,7 @@ module Dispatcher = struct
       | Ipv4 {src; dst; ihl; _} ->
           (src, dst, ihl)
       | _ ->
-          Log.err (fun m -> m "Dispathcer: dispatch %s" (Frame.fr_info pkt))
+          Log.err (fun m -> m "Dispatcher: dispatch %s" (Frame.fr_info pkt))
           |> Lwt.ignore_result ;
           assert false
     in
