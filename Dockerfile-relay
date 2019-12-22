@@ -7,7 +7,7 @@ ENV OCAMLYES=true
 
 RUN sudo apk update && sudo apk add alpine-sdk bash gmp-dev perl autoconf linux-headers zeromq-dev && \
     opam switch 4.08 && opam update && \
-    opam pin add -n mirage-net-psock.0.1.0 https://github.com/sevenEng/mirage-net-psock.git#921900d502504ac46ef63b52935e4398d24647f4 && \
+    opam pin add -n mirage-net-psock.0.1.0 https://github.com/me-box/mirage-net-psock.git && \
     opam switch import core-network.export
 
 ADD . .
