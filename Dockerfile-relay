@@ -3,7 +3,7 @@ FROM ocaml/opam2:alpine-3.7-ocaml-4.04 as BUILDER
 WORKDIR /core-network
 ADD core-network.export core-network.export
 
-ENV OCAMLYES=true
+ENV OPAMYES=true
 
 RUN sudo apk update && sudo apk add alpine-sdk bash gmp-dev perl autoconf linux-headers &&\
     #opam remote add git https://github.com/ocaml/opam-repository.git &&\
