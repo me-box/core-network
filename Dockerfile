@@ -1,12 +1,14 @@
 #FROM databoxsystems/base-image-ocaml:alpine-3.4_ocaml-4.04.2 as BUILDER
-FROM ocaml/opam:alpine-3.6_ocaml-4.04.2 as BUILDER
+FROM ocaml/opam2:alpine-3.7-ocaml-4.04 as BUILDER
+
+ENV OPAMYES=true
 
 WORKDIR /core-network
 ADD core-network.export core-network.export
 
 RUN sudo apk update && sudo apk add alpine-sdk bash gmp-dev perl autoconf linux-headers &&\
     #opam remote add git https://github.com/ocaml/opam-repository.git &&\
-    opam pin add -n mirage-net-psock.0.1.0 https://github.com/sevenEng/mirage-net-psock.git &&\
+    opam pin add -n mirage-net-psock.0.1.0 https://github.com/sevenEng/mirage-net-psock.git#921900d502504ac46ef63b52935e4398d24647f4 &&\
     opam switch import core-network.export
 
 ADD . .
