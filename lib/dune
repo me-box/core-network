@@ -1,0 +1,7 @@
+(library
+ (name lib_core_network)
+ (libraries arp arp-mirage base64 bos cohttp cohttp-lwt-unix cohttp-mirage
+   cstruct ethernet fpath ipaddr lwt lwt.unix mirage-clock-unix mirage-logs
+   mirage-net-psock mirage-os-shim mirage-protocols-lwt mirage-random-stdlib
+   mirage-types-lwt mirage-unix mirage-vnetif opium_kernel re tcpip
+   tcpip.icmpv4 tcpip.ipv4 tcpip.stack-direct tcpip.tcp))

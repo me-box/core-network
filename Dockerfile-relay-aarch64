@@ -2,11 +2,11 @@ FROM jptmoore/alpine-baseimage-aarch64
 
 USER databox
 RUN sudo apk add libffi-dev libressl-dev linux-headers bash autoconf
-RUN opam remove ezirmin irmin re.1.7.1 bos lwt
-RUN opam pin add -n mirage-net-psock.0.1.0 https://github.com/sevenEng/mirage-net-psock.git
+RUN opam remove ezirmin irmin re.1.7.1 bos lwt -y
+RUN opam pin add -n mirage-net-psock.0.1.0 https://github.com/me-box/mirage-net-psock.git#921900d502504ac46ef63b52935e4398d24647f4 -y
 
 ADD core-network.export core-network.export
-RUN opam switch import core-network.export
+RUN opam switch import core-network.export -y
 
 # add the code
 ADD bin bin
