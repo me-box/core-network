@@ -1,7 +1,6 @@
-#FROM databoxsystems/base-image-ocaml:alpine-3.4_ocaml-4.04.2 as BUILDER
 FROM ocaml/opam2:alpine as BUILDER
 
-ENV OCAMLYES=true
+ENV OPAMYES=true
 
 WORKDIR /core-network
 ADD core-network.export core-network.export
