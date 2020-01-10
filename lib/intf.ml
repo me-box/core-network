@@ -93,7 +93,7 @@ let start_intf t net eth arp recv_push send_st () =
   Lwt.catch
     (fun () ->
       try
-        Lwt.pick
+        Lwt.choose
           [read_intf t.dev net eth arp recv_push; write_intf t eth arp send_st]
       with e -> Lwt.fail e)
     (fun e ->

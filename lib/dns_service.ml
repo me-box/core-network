@@ -72,14 +72,17 @@ let to_dns_response pkt resp =
     -> (
       let payload_len = Udp_wire.sizeof_udp + Cstruct.len resp in
       let ip_hd =
+        try
         Ipv4_packet.
           { options= Cstruct.create 0
           ; src
           ; dst
           ; ttl= 38
           ; proto= Marshal.protocol_to_int `UDP
-          ; id= Random.int Int.max_int
+          ; id= Random.int (0xFFFF - 1)
           ; off= 0 }
+        with e -> 
+          Log.err (fun m -> m "to_dns_response: %s thrown \n %s" (Printexc.to_string e) (Printexc.get_backtrace ())) |> Lwt.ignore_result ; assert false
       in
       let ip_hd_wire = Cstruct.create Ipv4_wire.sizeof_ipv4 in
       match Ipv4_packet.Marshal.into_cstruct ~payload_len ip_hd ip_hd_wire with
